@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Jot
+Comment=Quick-capture note jotter
+Exec=/home/bjarneo/Code/jot/jot
+Icon=accessories-text-editor
+Terminal=false
+Type=Application
+Categories=Utility;TextEditor;
+Keywords=notes;quick;capture;jot;
