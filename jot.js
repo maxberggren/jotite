@@ -213,14 +213,13 @@ class ThemeManager {
             }
 
             .jot-open-button {
-                padding: 2px 6px;
-                border-radius: 7px;
+                padding: 4px 12px;
+                border-radius: 0;
                 border: 1px solid ${c.white};
                 background: ${c.black};
                 color: ${c.white};
-                font-weight: bold;
-                font-size: 10px;
-                margin-left: 12px;
+                font-weight: 500;
+                font-size: 11px;
             }
 
             .jot-open-button:hover {
@@ -440,16 +439,8 @@ class JotWindow extends Adw.ApplicationWindow {
         this._titleEntry.add_css_class('jot-title');
         this._titleEntry.connect('changed', () => this._updateFilenameDisplay());
 
-        const openButton = new Gtk.Button({
-            label: '+',
-            halign: Gtk.Align.END,
-        });
-        openButton.add_css_class('jot-open-button');
-        openButton.connect('clicked', () => this._openFileDialog());
-
         titleBox.append(hashLabel);
         titleBox.append(this._titleEntry);
-        titleBox.append(openButton);
 
         return titleBox;
     }
@@ -529,6 +520,12 @@ class JotWindow extends Adw.ApplicationWindow {
             halign: Gtk.Align.END,
         });
 
+        const openButton = new Gtk.Button({
+            label: '+',
+        });
+        openButton.add_css_class('jot-open-button');
+        openButton.connect('clicked', () => this._openFileDialog());
+
         const cancelButton = new Gtk.Button({ label: 'Cancel' });
         cancelButton.add_css_class('jot-button');
         cancelButton.connect('clicked', () => this.close());
@@ -538,6 +535,7 @@ class JotWindow extends Adw.ApplicationWindow {
         saveButton.add_css_class('jot-button-save');
         saveButton.connect('clicked', () => this._saveNote());
 
+        buttonBox.append(openButton);
         buttonBox.append(cancelButton);
         buttonBox.append(saveButton);
 
@@ -607,7 +605,6 @@ class JotWindow extends Adw.ApplicationWindow {
         const content = buffer.get_text(start, end, false);
 
         if (!content.trim()) {
-            this.close();
             return;
         }
 
