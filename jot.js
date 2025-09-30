@@ -397,6 +397,7 @@ class JotWindow extends Adw.ApplicationWindow {
         });
 
         this._currentFilename = 'untitled.md';
+        this._currentFilePath = null; // Track the full path of opened file
         this._themeManager = new ThemeManager();
 
         this._buildUI();
@@ -569,6 +570,11 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _updateFilenameDisplay() {
+        // If a file is already opened, don't change the path
+        if (this._currentFilePath) {
+            return;
+        }
+
         const title = this._titleEntry.get_text();
         this._currentFilename = FileManager.generateFilename(title);
 
@@ -600,8 +606,30 @@ class JotWindow extends Adw.ApplicationWindow {
 
         try {
             const title = this._titleEntry.get_text().trim();
-            const filename = FileManager.saveNote(title, content);
-            this._showFeedback(`✓ Saved: ${filename}`);
+
+            // If we have an opened file path, save back to that location
+            if (this._currentFilePath) {
+                const now = GLib.DateTime.new_now_local();
+                const timestamp = now.format('%Y-%m-%d %H:%M:%S');
+
+                let fileContent = '';
+                if (title) {
+                    fileContent = `# ${title}\n\n`;
+                }
+                fileContent += `*Created: ${timestamp}*\n\n${content}\n`;
+
+                const file = Gio.File.new_for_path(this._currentFilePath);
+                const outputStream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+                outputStream.write_all(fileContent, null);
+                outputStream.close(null);
+
+                print(`Note saved to ${this._currentFilePath}`);
+                this._showFeedback(`✓ Saved: ${this._currentFilename}`);
+            } else {
+                // New note - save to Jot directory
+                const filename = FileManager.saveNote(title, content);
+                this._showFeedback(`✓ Saved: ${filename}`);
+            }
         } catch (e) {
             print(`Error saving note: ${e.message}`);
             this._showFeedback(`✗ Error: ${e.message}`);
@@ -656,6 +684,7 @@ class JotWindow extends Adw.ApplicationWindow {
             buffer.set_text(content, -1);
 
             this._currentFilename = filename;
+            this._currentFilePath = filePath; // Store the full path
             this._pathLabel.set_label(filePath);
 
             print(`Loaded file: ${filePath}`);
