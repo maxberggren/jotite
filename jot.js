@@ -469,7 +469,14 @@ class JotWindow extends Adw.ApplicationWindow {
         const buffer = this._textView.get_buffer();
         buffer.connect('changed', () => this._updateStatusCounts());
 
-        return this._textView;
+        // Wrap in ScrolledWindow for scrolling
+        const scrolledWindow = new Gtk.ScrolledWindow({
+            child: this._textView,
+            vexpand: true,
+            hexpand: true,
+        });
+
+        return scrolledWindow;
     }
 
     _createStatusBar() {
