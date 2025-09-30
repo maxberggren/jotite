@@ -62,7 +62,7 @@ class JotWindow extends Adw.ApplicationWindow {
 
         // Title entry
         this._titleEntry = new Gtk.Entry({
-            placeholder_text: 'Title'
+            placeholder_text: 'Title',
             hexpand: true,
         });
         this._titleEntry.add_css_class('jot-title');
