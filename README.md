@@ -2,7 +2,7 @@
 
 <img src="icon.png" alt="Jot Icon" width="64" height="64" />
 
-A minimalist quick-capture note jotter for Linux desktop built with GJS and GTK4.
+Jot, a single-purpose tool for capturing a thought before it disappears.
 
 ## Features
 
