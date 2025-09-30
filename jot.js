@@ -7,7 +7,7 @@ const { Gtk, Gio, GLib, Adw, GObject } = imports.gi;
 
 // Constants
 const APP_ID = 'com.github.jot';
-const JOT_DIR = 'Jot';
+const JOT_DIR = ['Documents', 'Jot'];
 const THEME_PATH = ['.config', 'omarchy', 'current', 'theme', 'alacritty.toml'];
 const FEEDBACK_TIMEOUT_MS = 3000;
 
@@ -237,7 +237,7 @@ class ThemeManager {
 class FileManager {
     static getJotDirectory() {
         const homeDir = GLib.get_home_dir();
-        return GLib.build_filenamev([homeDir, JOT_DIR]);
+        return GLib.build_filenamev([homeDir, ...JOT_DIR]);
     }
 
     static ensureJotDirectoryExists() {
