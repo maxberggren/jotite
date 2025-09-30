@@ -10,8 +10,9 @@ class JotApplication extends Adw.Application {
     _init() {
         super._init({
             application_id: 'com.github.jot',
-            flags: Gio.ApplicationFlags.FLAGS_NONE,
+            flags: Gio.ApplicationFlags.HANDLES_OPEN,
         });
+        this._fileToOpen = null;
     }
 
     vfunc_activate() {
@@ -19,7 +20,22 @@ class JotApplication extends Adw.Application {
         if (!window) {
             window = new JotWindow(this);
         }
+
+        // If a file was passed via command line, load it
+        if (this._fileToOpen) {
+            window.loadFile(this._fileToOpen);
+            this._fileToOpen = null;
+        }
+
         window.present();
+    }
+
+    vfunc_open(files, hint) {
+        // Handle file passed from command line
+        if (files.length > 0) {
+            this._fileToOpen = files[0];
+        }
+        this.activate();
     }
 });
 
@@ -579,6 +595,10 @@ class JotWindow extends Adw.ApplicationWindow {
                 }
             }
         });
+    }
+
+    loadFile(file) {
+        this._loadFile(file);
     }
 
     _loadFile(file) {
