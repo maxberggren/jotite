@@ -8,13 +8,21 @@ Jot, a single-purpose tool for capturing a thought before it disappears.
 
 - **📝 Title-based notes**: Optional markdown title with automatic filename generation
 - **💾 Smart saving**: Save to `~/Documents/Jot/` or keep editing existing files in place
-- **🎨 Theme integration**: Automatically syncs with your Alacritty theme colors
-- **⌨️ Keyboard shortcuts**: `Ctrl+S` or `Ctrl+Enter` to save, `Escape` to close
+- **🎨 Theme integration**: Automatically syncs with your theme colors
+- **⌨️ Keyboard shortcuts**: `Ctrl+S` to save, `Escape` to close
 - **📂 File management**: Open existing `.md` and `.txt` files from any location
 - **🔄 Live preview**: Real-time character and word count in status bar
-- **🎯 Zero friction**: Clean, distraction-free interface with dark mode support
+- **🎯 Zero friction**: Clean, distraction-free interface
 
 ## Installation
+
+```bash
+yay -S jot-git
+```
+```
+```
+
+## Development
 
 ### Dependencies
 
@@ -87,24 +95,10 @@ Launch from your application menu after installing the desktop entry.
 
 Configure a global hotkey in your desktop environment to launch Jot:
 
-**GNOME:**
+**Omarchy:**
 ```bash
-# Settings → Keyboard → Keyboard Shortcuts → Custom Shortcuts
-# Add new shortcut with command: /path/to/jot.js
-# Assign your preferred hotkey (e.g., Super+J)
-```
-
-**KDE Plasma:**
-```bash
-# System Settings → Shortcuts → Custom Shortcuts
-# Add new Command/URL shortcut
-# Command: /path/to/jot.js
-```
-
-**i3/Sway:**
-```bash
-# Add to your config:
-bindsym $mod+j exec /path/to/jot.js
+# ~/.config/hypr/bindings.conf
+bindd = SUPER SHIFT, T, Tema, exec, uwsm app -- tema
 ```
 
 ## File Organization
@@ -145,15 +139,6 @@ The app watches for changes and reloads the theme automatically. If the theme fi
 - Text: `colors.normal.white`
 - Save button: `colors.normal.green`
 - Selection: `colors.normal.blue`
-
-## Architecture
-
-Jot follows GJS best practices with a modular architecture:
-
-- **ThemeManager**: Handles theme loading, parsing, and live reloading
-- **FileManager**: Static utility class for file operations
-- **JotApplication**: GTK application with command-line file handling
-- **JotWindow**: Main window with separated UI building methods
 
 ## Contributing
 
