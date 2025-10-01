@@ -4,6 +4,8 @@
 
 Jot, a single-purpose tool for capturing a thought before it disappears.
 
+https://github.com/user-attachments/assets/e132e309-d115-4bd1-a965-b219b8458457
+
 ## Features
 
 - **📝 Title-based notes**: Optional markdown title with automatic filename generation
