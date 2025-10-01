@@ -100,7 +100,7 @@ Configure a global hotkey in your desktop environment to launch Jot:
 **Omarchy:**
 ```bash
 # ~/.config/hypr/bindings.conf
-bindd = SUPER SHIFT, T, Tema, exec, uwsm app -- tema
+bindd = SUPER SHIFT, J, Jot, exec, uwsm app -- jot
 ```
 
 ## File Organization
