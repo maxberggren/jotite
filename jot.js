@@ -377,10 +377,11 @@ class MarkdownRenderer {
         });
         tagTable.add(h6Tag);
         
-        // Bullet points: - or *
+        // Bullet points: - or * (fainter than text)
         const bulletTag = new Gtk.TextTag({
             name: 'bullet',
-            foreground: this.colors.yellow,
+            foreground: this.colors.cyan,
+            scale: 0.9,
         });
         tagTable.add(bulletTag);
         
@@ -641,22 +642,77 @@ class MarkdownRenderer {
             this.buffer.apply_tag_by_name('bullet', bulletStart, bulletEnd);
         }
         
-        // Process patterns in order: code first (highest priority), then bold, italic, strikethrough
+        // Process patterns in order: bold first, then italic, then code, then strikethrough
+        // Bold: **text** or __text__
+        this._applyPattern(line, lineOffset, /\*\*(.+?)\*\*/g, 'bold');
+        this._applyPattern(line, lineOffset, /__(.+?)__/g, 'bold');
+        
         // Code: `code`
         this._applyPattern(line, lineOffset, /`([^`]+?)`/g, 'code');
         
-        // Bold: **text** or __text__
-        this._applyPattern(line, lineOffset, /(\*\*|__)(.+?)\1/g, 'bold');
-        
-        // Italic: *text* or _text_
-        this._applyPattern(line, lineOffset, /\*([^\*]+?)\*/g, 'italic');
-        this._applyPattern(line, lineOffset, /_([^_]+?)_/g, 'italic');
+        // Italic: handled specially to avoid matching **
+        this._applyItalicPatternSimple(line, lineOffset);
         
         // Strikethrough: ~~text~~
         this._applyPattern(line, lineOffset, /~~(.+?)~~/g, 'strikethrough');
         
         // Links: [text](url)
         this._applyLinkPattern(line, lineOffset);
+    }
+    
+    _applyItalicPatternSimple(line, lineOffset) {
+        // Match italic with * or _, but avoid matching ** or __
+        for (let i = 0; i < line.length; i++) {
+            if (line[i] === '*' && line[i+1] !== '*' && (i === 0 || line[i-1] !== '*')) {
+                // Found a potential opening *
+                for (let j = i + 1; j < line.length; j++) {
+                    if (line[j] === '*' && (j === line.length - 1 || line[j+1] !== '*') && line[j-1] !== '*') {
+                        // Found closing *
+                        const matchStart = lineOffset + i;
+                        const matchEnd = lineOffset + j + 1;
+                        const contentStart = matchStart + 1;
+                        const contentEnd = matchEnd - 1;
+                        
+                        const start = this.buffer.get_iter_at_offset(matchStart);
+                        const end = this.buffer.get_iter_at_offset(matchEnd);
+                        this.buffer.apply_tag_by_name('italic', start, end);
+                        
+                        const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                        const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                        this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                        
+                        const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                        const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                        this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                        break;
+                    }
+                }
+            } else if (line[i] === '_' && line[i+1] !== '_' && (i === 0 || line[i-1] !== '_')) {
+                // Found a potential opening _
+                for (let j = i + 1; j < line.length; j++) {
+                    if (line[j] === '_' && (j === line.length - 1 || line[j+1] !== '_') && line[j-1] !== '_') {
+                        // Found closing _
+                        const matchStart = lineOffset + i;
+                        const matchEnd = lineOffset + j + 1;
+                        const contentStart = matchStart + 1;
+                        const contentEnd = matchEnd - 1;
+                        
+                        const start = this.buffer.get_iter_at_offset(matchStart);
+                        const end = this.buffer.get_iter_at_offset(matchEnd);
+                        this.buffer.apply_tag_by_name('italic', start, end);
+                        
+                        const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                        const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                        this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                        
+                        const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                        const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                        this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                        break;
+                    }
+                }
+            }
+        }
     }
     
     _applyPattern(line, lineOffset, regex, tagName) {
@@ -846,13 +902,94 @@ class MarkdownRenderer {
         }
         
         // For inline patterns, check if cursor is inside each pattern
-        // Process in order: code first (highest priority), then bold, italic, strikethrough
+        // Process bold first, then italic, then code, then strikethrough
+        // Bold takes priority so we process it before italic
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /\*\*(.+?)\*\*/g, 'bold');
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /__(.+?)__/g, 'bold');
         this._applyPatternWithCursor(line, lineOffset, cursorOffset, /`([^`]+?)`/g, 'code');
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /(\*\*|__)(.+?)\1/g, 'bold');
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /\*([^\*]+?)\*/g, 'italic');
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /_([^_]+?)_/g, 'italic');
+        // For italic, we need to avoid matching ** by checking the character isn't an asterisk
+        this._applyItalicPattern(line, lineOffset, cursorOffset);
         this._applyPatternWithCursor(line, lineOffset, cursorOffset, /~~(.+?)~~/g, 'strikethrough');
         this._applyLinkPatternWithCursor(line, lineOffset, cursorOffset);
+    }
+    
+    _applyItalicPattern(line, lineOffset, cursorOffset) {
+        // Match italic with * or _, but avoid matching ** or __
+        for (let i = 0; i < line.length; i++) {
+            if (line[i] === '*' && line[i+1] !== '*' && (i === 0 || line[i-1] !== '*')) {
+                // Found a potential opening *
+                for (let j = i + 1; j < line.length; j++) {
+                    if (line[j] === '*' && (j === line.length - 1 || line[j+1] !== '*') && line[j-1] !== '*') {
+                        // Found closing *
+                        const matchStart = lineOffset + i;
+                        const matchEnd = lineOffset + j + 1;
+                        const contentStart = matchStart + 1;
+                        const contentEnd = matchEnd - 1;
+                        
+                        const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
+                        
+                        const start = this.buffer.get_iter_at_offset(matchStart);
+                        const end = this.buffer.get_iter_at_offset(matchEnd);
+                        this.buffer.apply_tag_by_name('italic', start, end);
+                        
+                        if (cursorInside) {
+                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                            this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+                            
+                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                            this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+                        } else {
+                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                            this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                            
+                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                            this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                        }
+                        break;
+                    }
+                }
+            } else if (line[i] === '_' && line[i+1] !== '_' && (i === 0 || line[i-1] !== '_')) {
+                // Found a potential opening _
+                for (let j = i + 1; j < line.length; j++) {
+                    if (line[j] === '_' && (j === line.length - 1 || line[j+1] !== '_') && line[j-1] !== '_') {
+                        // Found closing _
+                        const matchStart = lineOffset + i;
+                        const matchEnd = lineOffset + j + 1;
+                        const contentStart = matchStart + 1;
+                        const contentEnd = matchEnd - 1;
+                        
+                        const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
+                        
+                        const start = this.buffer.get_iter_at_offset(matchStart);
+                        const end = this.buffer.get_iter_at_offset(matchEnd);
+                        this.buffer.apply_tag_by_name('italic', start, end);
+                        
+                        if (cursorInside) {
+                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                            this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+                            
+                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                            this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+                        } else {
+                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                            this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                            
+                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                            this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
     }
     
     _applyPatternWithCursor(line, lineOffset, cursorOffset, regex, tagName) {
@@ -1122,6 +1259,9 @@ class JotWindow extends Adw.ApplicationWindow {
         const buffer = this._textView.get_buffer();
         buffer.connect('changed', () => this._updateFilenameDisplay());
 
+        // Setup bullet list keyboard handlers
+        this._setupBulletListHandlers();
+
         // Wrap in ScrolledWindow for scrolling
         const scrolledWindow = new Gtk.ScrolledWindow({
             child: this._textView,
@@ -1130,6 +1270,115 @@ class JotWindow extends Adw.ApplicationWindow {
         });
 
         return scrolledWindow;
+    }
+
+    _setupBulletListHandlers() {
+        const buffer = this._textView.get_buffer();
+        const keyController = new Gtk.EventControllerKey();
+        
+        keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            print(`BulletList handler: keyval=${keyval}, keycode=${keycode}, state=${state}`);
+            
+            // Get current position and line
+            const cursor = buffer.get_insert();
+            const iter = buffer.get_iter_at_mark(cursor);
+            const cursorOffset = iter.get_offset();
+            
+            // Get all text and find current line
+            const [start, end] = buffer.get_bounds();
+            const allText = buffer.get_text(start, end, false);
+            const lines = allText.split('\n');
+            
+            // Find which line we're on
+            let offset = 0;
+            let currentLineNum = 0;
+            let lineText = '';
+            let lineStartOffset = 0;
+            
+            for (let i = 0; i < lines.length; i++) {
+                const lineLength = lines[i].length;
+                if (cursorOffset >= offset && cursorOffset <= offset + lineLength) {
+                    currentLineNum = i;
+                    lineText = lines[i];
+                    lineStartOffset = offset;
+                    break;
+                }
+                offset += lineLength + 1; // +1 for newline
+            }
+            
+            if (lineText === undefined) {
+                lineText = lines[lines.length - 1] || '';
+                lineStartOffset = offset;
+            }
+            
+            print(`Current line: "${lineText}"`);
+            
+            // Handle Enter key (65293)
+            if (keyval === 65293 && !(state & CTRL_MASK)) {
+                print('Enter key detected on bullet list handler');
+                const bulletMatch = lineText.match(/^(\s*)([-*])\s+(.*)$/);
+                if (bulletMatch) {
+                    print('Bullet line detected!');
+                    const [, indent, bullet, content] = bulletMatch;
+                    
+                    // If line is empty bullet, remove it and exit list
+                    if (!content.trim()) {
+                        print('Empty bullet, removing');
+                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
+                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                        buffer.delete(lineStart, lineEnd);
+                        return true;
+                    }
+                    
+                    // Insert new bullet on next line
+                    print('Adding new bullet');
+                    const newBullet = `\n${indent}${bullet} `;
+                    buffer.insert_at_cursor(newBullet, -1);
+                    return true;
+                }
+            }
+            
+            // Handle Tab key (65289)
+            if (keyval === 65289 && !(state & CTRL_MASK)) {
+                print('Tab key detected');
+                const bulletMatch = lineText.match(/^(\s*)([-*])(\s+.*)$/);
+                if (bulletMatch) {
+                    print('Indenting bullet');
+                    const [, indent, bullet, rest] = bulletMatch;
+                    const newLine = `  ${indent}${bullet}${rest}`;
+                    const lineStart = buffer.get_iter_at_offset(lineStartOffset);
+                    const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                    buffer.delete(lineStart, lineEnd);
+                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                    buffer.insert(insertIter, newLine, -1);
+                    return true;
+                }
+            }
+            
+            // Handle Shift+Tab key (ISO_Left_Tab = 65056)
+            if (keyval === 65056) {
+                print('Shift+Tab detected');
+                const bulletMatch = lineText.match(/^(\s+)([-*])(\s+.*)$/);
+                if (bulletMatch) {
+                    print('Outdenting bullet');
+                    const [, indent, bullet, rest] = bulletMatch;
+                    // Remove up to 2 spaces
+                    const newIndent = indent.length >= 2 ? indent.substring(2) : '';
+                    const newLine = `${newIndent}${bullet}${rest}`;
+                    const lineStart = buffer.get_iter_at_offset(lineStartOffset);
+                    const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                    buffer.delete(lineStart, lineEnd);
+                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                    buffer.insert(insertIter, newLine, -1);
+                    return true;
+                }
+            }
+            
+            return false;
+        });
+        
+        this._textView.add_controller(keyController);
+        print('Bullet list handlers installed');
     }
 
     _createStatusBar() {
