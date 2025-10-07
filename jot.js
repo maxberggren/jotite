@@ -248,6 +248,624 @@ class ThemeManager {
 }
 
 // ============================================================================
+// Markdown Renderer
+// ============================================================================
+
+class MarkdownRenderer {
+    constructor(textView, colors) {
+        this.textView = textView;
+        this.buffer = textView.get_buffer();
+        this.colors = colors;
+        this.updating = false;
+        this.lastCursorPosition = -1;
+        
+        this._initTags();
+        this._setupSignals();
+    }
+    
+    _initTags() {
+        const tagTable = this.buffer.get_tag_table();
+        
+        // Remove existing tags if they exist
+        ['bold', 'italic', 'code', 'strikethrough', 'link', 'link-url', 
+         'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
+         'bullet', 'dim', 'invisible'].forEach(name => {
+            const existing = tagTable.lookup(name);
+            if (existing) tagTable.remove(existing);
+        });
+        
+        // Bold: **text** or __text__
+        const boldTag = new Gtk.TextTag({ name: 'bold', weight: 700 });
+        tagTable.add(boldTag);
+        
+        // Italic: *text* or _text_
+        const italicTag = new Gtk.TextTag({ name: 'italic', style: 2 }); // Pango.Style.ITALIC
+        tagTable.add(italicTag);
+        
+        // Code: `code`
+        const codeTag = new Gtk.TextTag({ 
+            name: 'code',
+            family: 'monospace',
+            background: this.colors.black,
+            foreground: this.colors.cyan,
+        });
+        tagTable.add(codeTag);
+        
+        // Strikethrough: ~~text~~
+        const strikeTag = new Gtk.TextTag({
+            name: 'strikethrough',
+            strikethrough: true,
+            foreground: this.colors.red,
+        });
+        tagTable.add(strikeTag);
+        
+        // Links: [text](url)
+        const linkTag = new Gtk.TextTag({
+            name: 'link',
+            foreground: this.colors.blue,
+            underline: 1, // Pango.Underline.SINGLE
+        });
+        tagTable.add(linkTag);
+        
+        const linkUrlTag = new Gtk.TextTag({
+            name: 'link-url',
+            foreground: this.colors.magenta,
+            scale: 0.85,
+        });
+        tagTable.add(linkUrlTag);
+        
+        // Headers: # Header
+        const h1Tag = new Gtk.TextTag({
+            name: 'heading1',
+            scale: 1.8,
+            weight: 700,
+            foreground: this.colors.blue,
+        });
+        tagTable.add(h1Tag);
+        
+        const h2Tag = new Gtk.TextTag({
+            name: 'heading2',
+            scale: 1.5,
+            weight: 700,
+            foreground: this.colors.cyan,
+        });
+        tagTable.add(h2Tag);
+        
+        const h3Tag = new Gtk.TextTag({
+            name: 'heading3',
+            scale: 1.2,
+            weight: 700,
+            foreground: this.colors.green,
+        });
+        tagTable.add(h3Tag);
+        
+        const h4Tag = new Gtk.TextTag({
+            name: 'heading4',
+            scale: 1.1,
+            weight: 700,
+            foreground: this.colors.yellow,
+        });
+        tagTable.add(h4Tag);
+        
+        const h5Tag = new Gtk.TextTag({
+            name: 'heading5',
+            scale: 1.05,
+            weight: 700,
+            foreground: this.colors.magenta,
+        });
+        tagTable.add(h5Tag);
+        
+        const h6Tag = new Gtk.TextTag({
+            name: 'heading6',
+            scale: 1.0,
+            weight: 700,
+            foreground: this.colors.red,
+        });
+        tagTable.add(h6Tag);
+        
+        // Bullet points: - or *
+        const bulletTag = new Gtk.TextTag({
+            name: 'bullet',
+            foreground: this.colors.yellow,
+        });
+        tagTable.add(bulletTag);
+        
+        // Dim tag for markdown syntax (when cursor is inside)
+        const dimTag = new Gtk.TextTag({
+            name: 'dim',
+            foreground: this.colors.cyan,
+            scale: 0.8,
+        });
+        tagTable.add(dimTag);
+        
+        // Invisible tag for markdown syntax (when cursor is outside)
+        const invisibleTag = new Gtk.TextTag({
+            name: 'invisible',
+            foreground: this.colors.background,
+            scale: 0.01,
+        });
+        tagTable.add(invisibleTag);
+    }
+    
+    _setupSignals() {
+        // Update on text changes
+        this.buffer.connect('changed', () => {
+            if (!this.updating) {
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    this._applyMarkdown();
+                    return false;
+                });
+            }
+        });
+        
+        // Update on cursor movement to show/hide syntax
+        this.buffer.connect('notify::cursor-position', () => {
+            if (!this.updating) {
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    this._adjustCursorPosition();
+                    this._updateSyntaxVisibility();
+                    return false;
+                });
+            }
+        });
+    }
+    
+    updateColors(colors) {
+        this.colors = colors;
+        this._initTags();
+        this._applyMarkdown();
+    }
+    
+    _adjustCursorPosition() {
+        if (this.updating) return;
+        
+        const cursor = this.buffer.get_insert();
+        const cursorIter = this.buffer.get_iter_at_mark(cursor);
+        const cursorOffset = cursorIter.get_offset();
+        
+        // Track movement direction
+        const movingForward = cursorOffset > this.lastCursorPosition;
+        const movingBackward = cursorOffset < this.lastCursorPosition;
+        const lastPos = this.lastCursorPosition;
+        this.lastCursorPosition = cursorOffset;
+        
+        // Don't adjust if we just adjusted or if cursor hasn't moved
+        if (lastPos === -1 || cursorOffset === lastPos) {
+            return;
+        }
+        
+        const [start, end] = this.buffer.get_bounds();
+        const text = this.buffer.get_text(start, end, false);
+        
+        // Check if we're on a markdown syntax character and need to adjust
+        const adjustment = this._findCursorAdjustment(text, cursorOffset, movingForward);
+        
+        // Only adjust if:
+        // 1. There's an adjustment to make
+        // 2. We're moving in a direction that makes sense (not trying to exit)
+        if (adjustment !== 0) {
+            // Don't adjust if we're trying to move backward but adjustment wants us forward
+            if (movingBackward && adjustment > 0) {
+                return;
+            }
+            // Don't adjust if we're trying to move forward but adjustment wants us backward
+            if (movingForward && adjustment < 0) {
+                return;
+            }
+            
+            this.updating = true;
+            const newIter = this.buffer.get_iter_at_offset(cursorOffset + adjustment);
+            this.buffer.place_cursor(newIter);
+            this.lastCursorPosition = cursorOffset + adjustment;
+            this.updating = false;
+        }
+    }
+    
+    _findCursorAdjustment(text, cursorOffset, movingForward) {
+        const lines = text.split('\n');
+        let lineStart = 0;
+        
+        for (const line of lines) {
+            const lineEnd = lineStart + line.length;
+            
+            if (cursorOffset >= lineStart && cursorOffset <= lineEnd) {
+                const posInLine = cursorOffset - lineStart;
+                
+                // Check inline patterns: bold, italic, code, strikethrough, links
+                const patterns = [
+                    { regex: /`([^`]+?)`/g, openLen: 1, closeLen: 1 },           // code
+                    { regex: /(\*\*|__)(.+?)\1/g, openLen: 2, closeLen: 2 },    // bold
+                    { regex: /\*([^\*]+?)\*/g, openLen: 1, closeLen: 1 },       // italic *
+                    { regex: /_([^_]+?)_/g, openLen: 1, closeLen: 1 },          // italic _
+                    { regex: /~~(.+?)~~/g, openLen: 2, closeLen: 2 },           // strikethrough
+                    { regex: /\[(.+?)\]\((.+?)\)/g, openLen: 1, closeLen: 0 },  // links (special)
+                ];
+                
+                for (const pattern of patterns) {
+                    let match;
+                    pattern.regex.lastIndex = 0;
+                    
+                    while ((match = pattern.regex.exec(line)) !== null) {
+                        const matchStart = match.index;
+                        const matchEnd = matchStart + match[0].length;
+                        
+                        // Special handling for links
+                        if (pattern.regex.source.includes('\\[')) {
+                            const textStart = matchStart + 1;
+                            const textEnd = textStart + match[1].length;
+                            const urlStart = textEnd + 2;
+                            const urlEnd = urlStart + match[2].length;
+                            
+                            // Only adjust if exactly on opening bracket when moving forward
+                            if (posInLine === matchStart && movingForward) {
+                                return textStart - posInLine;
+                            }
+                            // If on ]( characters, jump to url start
+                            if ((posInLine === textEnd || posInLine === textEnd + 1) && movingForward) {
+                                return urlStart - posInLine;
+                            }
+                        } else {
+                            const contentStart = matchStart + pattern.openLen;
+                            const contentEnd = matchEnd - pattern.closeLen;
+                            
+                            // Only adjust when landing exactly on opening/closing syntax
+                            if (posInLine >= matchStart && posInLine < contentStart) {
+                                // On opening syntax, only jump forward if moving forward
+                                if (movingForward) {
+                                    return contentStart - posInLine;
+                                }
+                            } else if (posInLine > contentEnd && posInLine <= matchEnd) {
+                                // On closing syntax, only jump backward if moving backward
+                                if (!movingForward) {
+                                    return contentEnd - posInLine;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Check for headers at line start - only when moving forward
+                const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+                if (headerMatch && posInLine <= headerMatch[1].length && movingForward) {
+                    // Jump past the hashes and space
+                    return (headerMatch[1].length + 1) - posInLine;
+                }
+                
+                break;
+            }
+            
+            lineStart = lineEnd + 1; // +1 for newline
+        }
+        
+        return 0;
+    }
+    
+    _applyMarkdown() {
+        if (this.updating) return;
+        
+        this.updating = true;
+        const [start, end] = this.buffer.get_bounds();
+        
+        // Remove all tags
+        this.buffer.remove_all_tags(start, end);
+        
+        const text = this.buffer.get_text(start, end, false);
+        const lines = text.split('\n');
+        let offset = 0;
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            this._applyLineMarkdown(line, offset);
+            offset += line.length + 1; // +1 for newline
+        }
+        
+        this.updating = false;
+    }
+    
+    _applyLineMarkdown(line, lineOffset) {
+        // Headers (must be at start of line)
+        const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+        if (headerMatch) {
+            const [, hashes, content] = headerMatch;
+            const level = hashes.length;
+            const start = this.buffer.get_iter_at_offset(lineOffset);
+            const end = this.buffer.get_iter_at_offset(lineOffset + line.length);
+            
+            this.buffer.apply_tag_by_name(`heading${level}`, start, end);
+            
+            // Hide the hashes by default (will be shown when cursor is on line)
+            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space
+            this.buffer.apply_tag_by_name('invisible', start, hashEnd);
+            return;
+        }
+        
+        // Bullet points (must be at start of line or after whitespace)
+        const bulletMatch = line.match(/^(\s*)([-*])\s+(.+)$/);
+        if (bulletMatch) {
+            const [, indent, bullet] = bulletMatch;
+            const bulletStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
+            const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
+            this.buffer.apply_tag_by_name('bullet', bulletStart, bulletEnd);
+        }
+        
+        // Process patterns in order: code first (highest priority), then bold, italic, strikethrough
+        // Code: `code`
+        this._applyPattern(line, lineOffset, /`([^`]+?)`/g, 'code');
+        
+        // Bold: **text** or __text__
+        this._applyPattern(line, lineOffset, /(\*\*|__)(.+?)\1/g, 'bold');
+        
+        // Italic: *text* or _text_
+        this._applyPattern(line, lineOffset, /\*([^\*]+?)\*/g, 'italic');
+        this._applyPattern(line, lineOffset, /_([^_]+?)_/g, 'italic');
+        
+        // Strikethrough: ~~text~~
+        this._applyPattern(line, lineOffset, /~~(.+?)~~/g, 'strikethrough');
+        
+        // Links: [text](url)
+        this._applyLinkPattern(line, lineOffset);
+    }
+    
+    _applyPattern(line, lineOffset, regex, tagName) {
+        let match;
+        regex.lastIndex = 0;
+        
+        while ((match = regex.exec(line)) !== null) {
+            const matchStart = match.index;
+            const matchEnd = matchStart + match[0].length;
+            const contentStart = matchStart + match[0].indexOf(match[match.length - 1]);
+            const contentEnd = contentStart + match[match.length - 1].length;
+            
+            // Apply tag to entire match
+            const start = this.buffer.get_iter_at_offset(lineOffset + matchStart);
+            const end = this.buffer.get_iter_at_offset(lineOffset + matchEnd);
+            this.buffer.apply_tag_by_name(tagName, start, end);
+            
+            // Dim the syntax markers
+            const syntaxStart1 = this.buffer.get_iter_at_offset(lineOffset + matchStart);
+            const syntaxEnd1 = this.buffer.get_iter_at_offset(lineOffset + contentStart);
+            this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+            
+            const syntaxStart2 = this.buffer.get_iter_at_offset(lineOffset + contentEnd);
+            const syntaxEnd2 = this.buffer.get_iter_at_offset(lineOffset + matchEnd);
+            this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+        }
+    }
+    
+    _applyLinkPattern(line, lineOffset) {
+        const regex = /\[(.+?)\]\((.+?)\)/g;
+        let match;
+        
+        while ((match = regex.exec(line)) !== null) {
+            const [fullMatch, text, url] = match;
+            const matchStart = match.index;
+            const textStart = matchStart + 1;
+            const textEnd = textStart + text.length;
+            const urlStart = textEnd + 2;
+            const urlEnd = urlStart + url.length;
+            
+            // Apply link tag to text
+            const linkStart = this.buffer.get_iter_at_offset(lineOffset + textStart);
+            const linkEnd = this.buffer.get_iter_at_offset(lineOffset + textEnd);
+            this.buffer.apply_tag_by_name('link', linkStart, linkEnd);
+            
+            // Apply link-url tag to URL
+            const urlStartIter = this.buffer.get_iter_at_offset(lineOffset + urlStart);
+            const urlEndIter = this.buffer.get_iter_at_offset(lineOffset + urlEnd);
+            this.buffer.apply_tag_by_name('link-url', urlStartIter, urlEndIter);
+            
+            // Dim the brackets and parentheses
+            const bracket1 = this.buffer.get_iter_at_offset(lineOffset + matchStart);
+            const bracket2 = this.buffer.get_iter_at_offset(lineOffset + matchStart + 1);
+            this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+            
+            const bracket3 = this.buffer.get_iter_at_offset(lineOffset + textEnd);
+            const bracket4 = this.buffer.get_iter_at_offset(lineOffset + textEnd + 1);
+            this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+            
+            const paren1 = this.buffer.get_iter_at_offset(lineOffset + urlStart - 1);
+            const paren2 = this.buffer.get_iter_at_offset(lineOffset + urlStart);
+            this.buffer.apply_tag_by_name('dim', paren1, paren2);
+            
+            const paren3 = this.buffer.get_iter_at_offset(lineOffset + urlEnd);
+            const paren4 = this.buffer.get_iter_at_offset(lineOffset + urlEnd + 1);
+            this.buffer.apply_tag_by_name('dim', paren3, paren4);
+        }
+    }
+    
+    _updateSyntaxVisibility() {
+        if (this.updating) return;
+        
+        this.updating = true;
+        
+        // Get cursor position
+        const cursor = this.buffer.get_insert();
+        const cursorIter = this.buffer.get_iter_at_mark(cursor);
+        const cursorOffset = cursorIter.get_offset();
+        
+        // Get all text
+        const [start, end] = this.buffer.get_bounds();
+        const text = this.buffer.get_text(start, end, false);
+        
+        // Remove all tags first
+        this.buffer.remove_all_tags(start, end);
+        
+        // Find all markdown patterns and apply them
+        // Show syntax markers only when cursor is inside the pattern
+        this._applyMarkdownWithCursorContext(text, cursorOffset);
+        
+        this.updating = false;
+    }
+    
+    _applyMarkdownWithCursorContext(text, cursorOffset) {
+        const lines = text.split('\n');
+        let offset = 0;
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const lineEnd = offset + line.length;
+            
+            // Check if cursor is on this line
+            const cursorOnLine = cursorOffset >= offset && cursorOffset <= lineEnd;
+            
+            this._applyLineMarkdownWithCursor(line, offset, cursorOffset, cursorOnLine);
+            offset += line.length + 1; // +1 for newline
+        }
+    }
+    
+    _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine) {
+        // Headers (must be at start of line)
+        const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+        if (headerMatch) {
+            const [, hashes, content] = headerMatch;
+            const level = hashes.length;
+            const start = this.buffer.get_iter_at_offset(lineOffset);
+            const end = this.buffer.get_iter_at_offset(lineOffset + line.length);
+            
+            this.buffer.apply_tag_by_name(`heading${level}`, start, end);
+            
+            // Show/hide the hashes based on cursor position
+            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space after #
+            if (cursorOnLine) {
+                // Cursor is on this line - show hashes with dim tag
+                this.buffer.apply_tag_by_name('dim', start, hashEnd);
+            } else {
+                // Cursor is on a different line - hide the hashes
+                this.buffer.apply_tag_by_name('invisible', start, hashEnd);
+            }
+            return;
+        }
+        
+        // Bullet points
+        const bulletMatch = line.match(/^(\s*)([-*])\s+(.+)$/);
+        if (bulletMatch) {
+            const [, indent, bullet] = bulletMatch;
+            const bulletStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
+            const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
+            this.buffer.apply_tag_by_name('bullet', bulletStart, bulletEnd);
+        }
+        
+        // For inline patterns, check if cursor is inside each pattern
+        // Process in order: code first (highest priority), then bold, italic, strikethrough
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /`([^`]+?)`/g, 'code');
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /(\*\*|__)(.+?)\1/g, 'bold');
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /\*([^\*]+?)\*/g, 'italic');
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /_([^_]+?)_/g, 'italic');
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /~~(.+?)~~/g, 'strikethrough');
+        this._applyLinkPatternWithCursor(line, lineOffset, cursorOffset);
+    }
+    
+    _applyPatternWithCursor(line, lineOffset, cursorOffset, regex, tagName) {
+        let match;
+        regex.lastIndex = 0;
+        
+        while ((match = regex.exec(line)) !== null) {
+            const matchStart = lineOffset + match.index;
+            const matchEnd = matchStart + match[0].length;
+            const contentStart = matchStart + match[0].indexOf(match[match.length - 1]);
+            const contentEnd = contentStart + match[match.length - 1].length;
+            
+            // Check if cursor is inside this pattern
+            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
+            
+            // Apply formatting tag to entire match
+            const start = this.buffer.get_iter_at_offset(matchStart);
+            const end = this.buffer.get_iter_at_offset(matchEnd);
+            this.buffer.apply_tag_by_name(tagName, start, end);
+            
+            // Show syntax markers only when cursor is inside
+            if (cursorInside) {
+                // Dim the syntax markers (visible but subtle)
+                const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+                
+                const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+            } else {
+                // Cursor is outside - make syntax invisible
+                const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
+                const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
+                this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                
+                const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
+                const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
+                this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+            }
+        }
+    }
+    
+    _applyLinkPatternWithCursor(line, lineOffset, cursorOffset) {
+        const regex = /\[(.+?)\]\((.+?)\)/g;
+        let match;
+        
+        while ((match = regex.exec(line)) !== null) {
+            const [fullMatch, text, url] = match;
+            const matchStart = lineOffset + match.index;
+            const textStart = matchStart + 1;
+            const textEnd = textStart + text.length;
+            const urlStart = textEnd + 2;
+            const urlEnd = urlStart + url.length;
+            const matchEnd = urlEnd + 1;
+            
+            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
+            
+            // Apply link tag to text
+            const linkStart = this.buffer.get_iter_at_offset(textStart);
+            const linkEnd = this.buffer.get_iter_at_offset(textEnd);
+            this.buffer.apply_tag_by_name('link', linkStart, linkEnd);
+            
+            // Show URL and syntax when cursor is inside
+            if (cursorInside) {
+                // Apply link-url tag to URL (visible)
+                const urlStartIter = this.buffer.get_iter_at_offset(urlStart);
+                const urlEndIter = this.buffer.get_iter_at_offset(urlEnd);
+                this.buffer.apply_tag_by_name('link-url', urlStartIter, urlEndIter);
+                
+                // Dim the brackets and parentheses
+                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
+                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
+                this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+                
+                const bracket3 = this.buffer.get_iter_at_offset(textEnd);
+                const bracket4 = this.buffer.get_iter_at_offset(textEnd + 1);
+                this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+                
+                const paren1 = this.buffer.get_iter_at_offset(urlStart - 1);
+                const paren2 = this.buffer.get_iter_at_offset(urlStart);
+                this.buffer.apply_tag_by_name('dim', paren1, paren2);
+                
+                const paren3 = this.buffer.get_iter_at_offset(urlEnd);
+                const paren4 = this.buffer.get_iter_at_offset(urlEnd + 1);
+                this.buffer.apply_tag_by_name('dim', paren3, paren4);
+            } else {
+                // Hide URL and syntax when cursor is outside
+                const urlStartIter = this.buffer.get_iter_at_offset(urlStart);
+                const urlEndIter = this.buffer.get_iter_at_offset(urlEnd);
+                this.buffer.apply_tag_by_name('invisible', urlStartIter, urlEndIter);
+                
+                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
+                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
+                this.buffer.apply_tag_by_name('invisible', bracket1, bracket2);
+                
+                const bracket3 = this.buffer.get_iter_at_offset(textEnd);
+                const bracket4 = this.buffer.get_iter_at_offset(textEnd + 1);
+                this.buffer.apply_tag_by_name('invisible', bracket3, bracket4);
+                
+                const paren1 = this.buffer.get_iter_at_offset(urlStart - 1);
+                const paren2 = this.buffer.get_iter_at_offset(urlStart);
+                this.buffer.apply_tag_by_name('invisible', paren1, paren2);
+                
+                const paren3 = this.buffer.get_iter_at_offset(urlEnd);
+                const paren4 = this.buffer.get_iter_at_offset(urlEnd + 1);
+                this.buffer.apply_tag_by_name('invisible', paren3, paren4);
+            }
+        }
+    }
+}
+
+// ============================================================================
 // File Manager
 // ============================================================================
 
@@ -296,70 +914,6 @@ class FileManager {
         return `jot-${now.format('%Y%m%d-%H%M%S')}.md`;
     }
 
-    static saveNote(title, content) {
-        this.ensureJotDirectoryExists();
-
-        const filename = this.generateFilename(title);
-        const filePath = GLib.build_filenamev([this.getJotDirectory(), filename]);
-        const now = GLib.DateTime.new_now_local();
-        const timestamp = now.format('%Y-%m-%d %H:%M:%S');
-
-        let fileContent = '';
-        if (title) {
-            fileContent = `# ${title}\n\n`;
-        }
-        fileContent += `*Created: ${timestamp}*\n\n${content}\n`;
-
-        const file = Gio.File.new_for_path(filePath);
-        const outputStream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
-        outputStream.write_all(fileContent, null);
-        outputStream.close(null);
-
-        print(`Note saved to ${filePath}`);
-        return filename;
-    }
-
-    static loadFile(file) {
-        const [success, contents] = file.load_contents(null);
-        if (!success) {
-            throw new Error('Failed to load file');
-        }
-
-        const text = new TextDecoder().decode(contents);
-        return this.parseFileContent(text, file);
-    }
-
-    static parseFileContent(text, file) {
-        const lines = text.split('\n');
-        let title = '';
-        let contentStart = 0;
-
-        // Check if first line is a markdown title
-        if (lines[0]?.startsWith('# ')) {
-            title = lines[0].substring(2).trim();
-            contentStart = 1;
-
-            // Skip empty lines after title
-            while (contentStart < lines.length && !lines[contentStart].trim()) {
-                contentStart++;
-            }
-
-            // Skip timestamp line if present
-            if (lines[contentStart]?.startsWith('*Created:')) {
-                contentStart++;
-                while (contentStart < lines.length && !lines[contentStart].trim()) {
-                    contentStart++;
-                }
-            }
-        }
-
-        return {
-            title,
-            content: lines.slice(contentStart).join('\n'),
-            filePath: file.get_path(),
-            filename: file.get_basename(),
-        };
-    }
 }
 
 // ============================================================================
@@ -418,12 +972,19 @@ class JotWindow extends Adw.ApplicationWindow {
         this._lastSaveClickTime = 0; // Track double-click for Save As
         this._zoomLevel = 100; // Zoom level percentage (default 100%)
         this._zoomTimeoutId = null; // Track zoom indicator timeout
+        this._markdownRenderer = null; // Will be initialized after textview is created
 
         this._buildUI();
         this._setupTheme();
         this._setupKeyboardShortcuts();
 
-        this._titleEntry.grab_focus();
+        // Initialize with default header if empty
+        const buffer = this._textView.get_buffer();
+        buffer.set_text('# ', -1);
+        const iter = buffer.get_iter_at_offset(2); // Position after "# "
+        buffer.place_cursor(iter);
+        
+        this._textView.grab_focus();
     }
 
     _buildUI() {
@@ -432,43 +993,12 @@ class JotWindow extends Adw.ApplicationWindow {
             spacing: 0,
         });
 
-        mainBox.append(this._createTitleBar());
         mainBox.append(this._createTextView());
         mainBox.append(this._createStatusBar());
 
         this.set_content(mainBox);
     }
 
-    _createTitleBar() {
-        const titleBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 0,
-            margin_start: 20,
-            margin_end: 20,
-            margin_top: 20,
-            margin_bottom: 0,
-        });
-
-        const hashLabel = new Gtk.Label({ label: '#', halign: Gtk.Align.START });
-        hashLabel.add_css_class('jot-hash');
-
-        this._titleEntry = new Gtk.Entry({
-            placeholder_text: 'Title',
-            hexpand: true,
-        });
-        this._titleEntry.add_css_class('jot-title');
-        this._titleEntry.connect('changed', () => this._updateFilenameDisplay());
-        
-        // Add Enter key handler to switch focus to text view
-        this._titleEntry.connect('activate', () => {
-            this._textView.grab_focus();
-        });
-
-        titleBox.append(hashLabel);
-        titleBox.append(this._titleEntry);
-
-        return titleBox;
-    }
 
     _createTextView() {
         this._textView = new Gtk.TextView({
@@ -477,10 +1007,20 @@ class JotWindow extends Adw.ApplicationWindow {
             hexpand: true,
             left_margin: 20,
             right_margin: 20,
-            top_margin: 12,
+            top_margin: 20,
             bottom_margin: 20,
         });
         this._textView.add_css_class('jot-textview');
+
+        // Initialize markdown renderer
+        this._markdownRenderer = new MarkdownRenderer(
+            this._textView,
+            this._themeManager.colors
+        );
+
+        // Connect to buffer changes to update filename
+        const buffer = this._textView.get_buffer();
+        buffer.connect('changed', () => this._updateFilenameDisplay());
 
         // Wrap in ScrolledWindow for scrolling
         const scrolledWindow = new Gtk.ScrolledWindow({
@@ -564,6 +1104,11 @@ class JotWindow extends Adw.ApplicationWindow {
             cssProvider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         );
+        
+        // Update markdown renderer colors
+        if (this._markdownRenderer) {
+            this._markdownRenderer.updateColors(this._themeManager.colors);
+        }
     }
 
     _setupKeyboardShortcuts() {
@@ -602,13 +1147,30 @@ class JotWindow extends Adw.ApplicationWindow {
         this.add_controller(keyController);
     }
 
+    _extractTitleFromContent() {
+        const buffer = this._textView.get_buffer();
+        const [start, end] = buffer.get_bounds();
+        const content = buffer.get_text(start, end, false);
+        
+        // Look for first H1 header
+        const lines = content.split('\n');
+        for (const line of lines) {
+            const headerMatch = line.match(/^#\s+(.+)$/);
+            if (headerMatch) {
+                return headerMatch[1].trim();
+            }
+        }
+        
+        return '';
+    }
+
     _updateFilenameDisplay() {
         // If a file is already opened, don't change the path
         if (this._currentFilePath) {
             return;
         }
 
-        const title = this._titleEntry.get_text();
+        const title = this._extractTitleFromContent();
         this._currentFilename = FileManager.generateFilename(title);
 
         const jotDir = FileManager.getJotDirectory();
@@ -625,7 +1187,7 @@ class JotWindow extends Adw.ApplicationWindow {
             return;
         }
 
-        const title = this._titleEntry.get_text().trim();
+        const title = this._extractTitleFromContent();
         
         // Check for double-click (within 1 second)
         const currentTime = GLib.get_monotonic_time() / 1000; // Convert to milliseconds
@@ -636,15 +1198,17 @@ class JotWindow extends Adw.ApplicationWindow {
         // If file exists and not double-click, just save directly
         if (this._currentFilePath && !isDoubleClick) {
             const file = Gio.File.new_for_path(this._currentFilePath);
-            this._saveToFile(file, title, content);
+            this._saveToFile(file, content);
             return;
         }
         
         // Show "Save As" dialog for new files or double-click
-        this._showSaveAsDialog(title, content);
+        this._showSaveAsDialog(content);
     }
     
-    _showSaveAsDialog(title, content) {
+    _showSaveAsDialog(content) {
+        const title = this._extractTitleFromContent();
+        
         // Create file save dialog using FileChooserNative
         const dialog = new Gtk.FileChooserNative({
             title: 'Save File',
@@ -673,7 +1237,7 @@ class JotWindow extends Adw.ApplicationWindow {
             if (response === Gtk.ResponseType.ACCEPT) {
                 const file = dialog.get_file();
                 if (file) {
-                    this._saveToFile(file, title, content);
+                    this._saveToFile(file, content);
                 }
             }
             dialog.destroy();
@@ -682,19 +1246,11 @@ class JotWindow extends Adw.ApplicationWindow {
         dialog.show();
     }
     
-    _saveToFile(file, title, content) {
+    _saveToFile(file, content) {
         try {
-            const now = GLib.DateTime.new_now_local();
-            const timestamp = now.format('%Y-%m-%d %H:%M:%S');
-            
-            let fileContent = '';
-            if (title) {
-                fileContent = `# ${title}\n\n`;
-            }
-            fileContent += `*Created: ${timestamp}*\n\n${content}\n`;
-            
+            // Save content as-is (it already contains the markdown with header)
             const outputStream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
-            outputStream.write_all(fileContent, null);
+            outputStream.write_all(content, null);
             outputStream.close(null);
             
             // Update current file info
@@ -801,17 +1357,20 @@ class JotWindow extends Adw.ApplicationWindow {
 
     loadFile(file) {
         try {
-            const { title, content, filePath, filename } = FileManager.loadFile(file);
+            const [success, contents] = file.load_contents(null);
+            if (!success) {
+                throw new Error('Failed to load file');
+            }
 
-            this._titleEntry.set_text(title);
+            const text = new TextDecoder().decode(contents);
             const buffer = this._textView.get_buffer();
-            buffer.set_text(content, -1);
+            buffer.set_text(text, -1);
 
-            this._currentFilename = filename;
-            this._currentFilePath = filePath; // Store the full path
-            this._pathLabel.set_label(filePath);
+            this._currentFilename = file.get_basename();
+            this._currentFilePath = file.get_path();
+            this._pathLabel.set_label(this._currentFilePath);
 
-            print(`Loaded file: ${filePath}`);
+            print(`Loaded file: ${this._currentFilePath}`);
         } catch (e) {
             print(`Error loading file: ${e.message}`);
         }
