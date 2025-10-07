@@ -58,14 +58,29 @@ class ThemeManager {
 
     _parseTomlColors(text) {
         const colors = {};
+        let fontFamily = null;
         const lines = text.split('\n');
         let currentSection = '';
 
         for (const line of lines) {
+            // Check for [font] section
+            if (line.match(/^\[font\]/)) {
+                currentSection = 'font';
+                continue;
+            }
+            
             const sectionMatch = line.match(/^\[colors\.(\w+)\]/);
             if (sectionMatch) {
                 currentSection = sectionMatch[1];
                 continue;
+            }
+
+            // Parse font family from [font] section
+            if (currentSection === 'font') {
+                const fontMatch = line.match(/normal\s*=\s*\{\s*family\s*=\s*"([^"]+)"/);
+                if (fontMatch) {
+                    fontFamily = fontMatch[1];
+                }
             }
 
             const match = line.match(/^(\w+)\s*=\s*"([^"]+)"/);
@@ -88,6 +103,7 @@ class ThemeManager {
             magenta: colors.magenta || '#4A689C',
             cyan: colors.cyan || '#D55F8D',
             white: colors.white || '#a5bfd8',
+            font: fontFamily || 'monospace',
         };
     }
 
@@ -104,6 +120,7 @@ class ThemeManager {
             magenta: '#bc8cff',
             cyan: '#39c5cf',
             white: '#e6edf3',
+            font: 'monospace',
         };
     }
 
@@ -150,7 +167,7 @@ class ThemeManager {
                 background: transparent;
                 color: ${c.foreground};
                 font-size: ${15 * zoom}px;
-                font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', 'DejaVu Sans Mono', 'Courier New', monospace;
+                font-family: '${c.font}', monospace;
                 caret-color: ${c.white};
             }
 
@@ -214,7 +231,7 @@ class ThemeManager {
                 color: ${c.white};
                 font-size: ${18 * zoom}px;
                 font-weight: bold;
-                font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', 'DejaVu Sans Mono', 'Courier New', monospace;
+                font-family: '${c.font}', monospace;
                 margin-right: 8px;
             }
 
@@ -224,7 +241,7 @@ class ThemeManager {
                 color: ${c.white};
                 font-size: ${18 * zoom}px;
                 font-weight: bold;
-                font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', 'DejaVu Sans Mono', 'Courier New', monospace;
+                font-family: '${c.font}', monospace;
                 padding: 0;
                 box-shadow: none;
                 outline: none;
@@ -409,9 +426,30 @@ class MarkdownRenderer {
         this.colors = colors;
         this.updating = false;
         this.lastCursorPosition = -1;
+        this._renderTimeoutId = null;
+        this._cursorTimeoutId = null;
         
         this._initTags();
         this._setupSignals();
+    }
+    
+    _lightenColor(color, percent = 10) {
+        // Parse hex color
+        const hex = color.replace('#', '');
+        let r = parseInt(hex.substr(0, 2), 16);
+        let g = parseInt(hex.substr(2, 2), 16);
+        let b = parseInt(hex.substr(4, 2), 16);
+        
+        // Lighten by adding to each channel
+        r = Math.min(255, Math.floor(r + (255 - r) * (percent / 100)));
+        g = Math.min(255, Math.floor(g + (255 - g) * (percent / 100)));
+        b = Math.min(255, Math.floor(b + (255 - b) * (percent / 100)));
+        
+        // Convert back to hex
+        return '#' + 
+            r.toString(16).padStart(2, '0') + 
+            g.toString(16).padStart(2, '0') + 
+            b.toString(16).padStart(2, '0');
     }
     
     _initTags() {
@@ -433,24 +471,24 @@ class MarkdownRenderer {
         const italicTag = new Gtk.TextTag({ name: 'italic', style: 2 }); // Pango.Style.ITALIC
         tagTable.add(italicTag);
         
-        // Code: `code` - Slack-style with subtle background
+        // Code: `code` - Slack-style with subtle background (slightly lighter than main bg)
         const codeTag = new Gtk.TextTag({ 
             name: 'code',
             family: 'monospace',
             foreground: this.colors.red,
-            background: this.colors.black,  // Use theme's black color for background
+            background: this._lightenColor(this.colors.background, 8),  // 8% lighter than background
             scale: 0.95,  // Slightly smaller but keeps line height consistent
             weight: 500,
             rise: -200,  // Slight vertical adjustment for visual balance
         });
         tagTable.add(codeTag);
         
-        // Code block: ```code block```
+        // Code block: ```code block``` (slightly lighter than main bg)
         const codeBlockTag = new Gtk.TextTag({ 
             name: 'code-block',
             family: 'monospace',
             foreground: this.colors.red,
-            paragraph_background: this.colors.black,  // Use theme's black color for background
+            paragraph_background: this._lightenColor(this.colors.background, 8),  // 8% lighter than background
             scale: 0.95,
             weight: 500,
         });
@@ -460,7 +498,6 @@ class MarkdownRenderer {
         const strikeTag = new Gtk.TextTag({
             name: 'strikethrough',
             strikethrough: true,
-            foreground: this.colors.red,
         });
         tagTable.add(strikeTag);
         
@@ -468,7 +505,6 @@ class MarkdownRenderer {
         const underlineTag = new Gtk.TextTag({
             name: 'underline',
             underline: 1,  // Pango.Underline.SINGLE
-            foreground: this.colors.cyan,
         });
         tagTable.add(underlineTag);
         
@@ -492,7 +528,6 @@ class MarkdownRenderer {
             name: 'heading1',
             scale: 1.8,
             weight: 700,
-            foreground: this.colors.blue,
         });
         tagTable.add(h1Tag);
         
@@ -500,7 +535,6 @@ class MarkdownRenderer {
             name: 'heading2',
             scale: 1.5,
             weight: 700,
-            foreground: this.colors.cyan,
         });
         tagTable.add(h2Tag);
         
@@ -508,7 +542,6 @@ class MarkdownRenderer {
             name: 'heading3',
             scale: 1.2,
             weight: 700,
-            foreground: this.colors.green,
         });
         tagTable.add(h3Tag);
         
@@ -516,7 +549,6 @@ class MarkdownRenderer {
             name: 'heading4',
             scale: 1.1,
             weight: 700,
-            foreground: this.colors.yellow,
         });
         tagTable.add(h4Tag);
         
@@ -524,7 +556,6 @@ class MarkdownRenderer {
             name: 'heading5',
             scale: 1.05,
             weight: 700,
-            foreground: this.colors.magenta,
         });
         tagTable.add(h5Tag);
         
@@ -532,7 +563,6 @@ class MarkdownRenderer {
             name: 'heading6',
             scale: 1.0,
             weight: 700,
-            foreground: this.colors.red,
         });
         tagTable.add(h6Tag);
         
@@ -562,22 +592,34 @@ class MarkdownRenderer {
     }
     
     _setupSignals() {
-        // Update on text changes
+        // Update on text changes with debouncing (50ms delay)
         this.buffer.connect('changed', () => {
             if (!this.updating) {
-                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                // Cancel previous timeout if exists
+                if (this._renderTimeoutId) {
+                    GLib.source_remove(this._renderTimeoutId);
+                }
+                // Schedule new render
+                this._renderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
                     this._applyMarkdown();
+                    this._renderTimeoutId = null;
                     return false;
                 });
             }
         });
         
-        // Update on cursor movement to show/hide syntax
+        // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
         this.buffer.connect('notify::cursor-position', () => {
             if (!this.updating) {
-                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                // Cancel previous timeout if exists
+                if (this._cursorTimeoutId) {
+                    GLib.source_remove(this._cursorTimeoutId);
+                }
+                // Schedule new cursor update
+                this._cursorTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
                     this._adjustCursorPosition();
                     this._updateSyntaxVisibility();
+                    this._cursorTimeoutId = null;
                     return false;
                 });
             }
@@ -1332,7 +1374,7 @@ class FileManager {
         }
 
         const now = GLib.DateTime.new_now_local();
-        return `jot-${now.format('%Y%m%d-%H%M%S')}.md`;
+        return `${now.format('%Y-%m-%d')}.md`;
     }
 
 }
@@ -1393,16 +1435,20 @@ class JotWindow extends Adw.ApplicationWindow {
         this._lastSaveClickTime = 0; // Track double-click for Save As
         this._zoomLevel = 100; // Zoom level percentage (default 100%)
         this._zoomTimeoutId = null; // Track zoom indicator timeout
+        this._filenameUpdateTimeoutId = null; // Track filename update debouncing
         this._markdownRenderer = null; // Will be initialized after textview is created
 
         this._buildUI();
         this._setupTheme();
         this._setupKeyboardShortcuts();
 
-        // Initialize with default header if empty
+        // Initialize with default header with today's date
         const buffer = this._textView.get_buffer();
-        buffer.set_text('# ', -1);
-        const iter = buffer.get_iter_at_offset(2); // Position after "# "
+        const now = GLib.DateTime.new_now_local();
+        const todayDate = now.format('%Y-%m-%d');
+        const initialText = `# ${todayDate}`;
+        buffer.set_text(initialText, -1);
+        const iter = buffer.get_iter_at_offset(initialText.length); // Position at end
         buffer.place_cursor(iter);
         
         this._textView.grab_focus();
@@ -1439,9 +1485,20 @@ class JotWindow extends Adw.ApplicationWindow {
             this._themeManager.colors
         );
 
-        // Connect to buffer changes to update filename
+        // Connect to buffer changes to update filename with debouncing (200ms delay)
         const buffer = this._textView.get_buffer();
-        buffer.connect('changed', () => this._updateFilenameDisplay());
+        buffer.connect('changed', () => {
+            // Cancel previous timeout if exists
+            if (this._filenameUpdateTimeoutId) {
+                GLib.source_remove(this._filenameUpdateTimeoutId);
+            }
+            // Schedule new filename update
+            this._filenameUpdateTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 200, () => {
+                this._updateFilenameDisplay();
+                this._filenameUpdateTimeoutId = null;
+                return false;
+            });
+        });
 
         // Setup bullet list keyboard handlers
         this._setupBulletListHandlers();
