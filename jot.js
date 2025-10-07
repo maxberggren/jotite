@@ -428,6 +428,7 @@ class MarkdownRenderer {
         this.lastCursorPosition = -1;
         this._renderTimeoutId = null;
         this._cursorTimeoutId = null;
+        this._textJustChanged = false; // Track if text was recently changed
         
         this._initTags();
         this._setupSignals();
@@ -595,14 +596,22 @@ class MarkdownRenderer {
         // Update on text changes with debouncing (50ms delay)
         this.buffer.connect('changed', () => {
             if (!this.updating) {
+                // Mark that text just changed to prevent cursor flicker
+                this._textJustChanged = true;
+                
                 // Cancel previous timeout if exists
                 if (this._renderTimeoutId) {
                     GLib.source_remove(this._renderTimeoutId);
                 }
-                // Schedule new render
+                // Schedule new render (cursor-aware so syntax shows where we're typing)
                 this._renderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
-                    this._applyMarkdown();
+                    this._updateSyntaxVisibility();
                     this._renderTimeoutId = null;
+                    // Reset the flag after a short delay to allow cursor updates again
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
+                        this._textJustChanged = false;
+                        return false;
+                    });
                     return false;
                 });
             }
@@ -610,7 +619,7 @@ class MarkdownRenderer {
         
         // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
         this.buffer.connect('notify::cursor-position', () => {
-            if (!this.updating) {
+            if (!this.updating && !this._textJustChanged) {
                 // Cancel previous timeout if exists
                 if (this._cursorTimeoutId) {
                     GLib.source_remove(this._cursorTimeoutId);
