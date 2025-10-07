@@ -267,7 +267,7 @@ class MarkdownRenderer {
         const tagTable = this.buffer.get_tag_table();
         
         // Remove existing tags if they exist
-        ['bold', 'italic', 'code', 'strikethrough', 'link', 'link-url', 
+        ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
          'bullet', 'dim', 'invisible'].forEach(name => {
             const existing = tagTable.lookup(name);
@@ -282,14 +282,28 @@ class MarkdownRenderer {
         const italicTag = new Gtk.TextTag({ name: 'italic', style: 2 }); // Pango.Style.ITALIC
         tagTable.add(italicTag);
         
-        // Code: `code`
+        // Code: `code` - Slack-style with subtle background
         const codeTag = new Gtk.TextTag({ 
             name: 'code',
             family: 'monospace',
-            background: this.colors.black,
-            foreground: this.colors.cyan,
+            foreground: this.colors.red,
+            background: '#2a2a2a',  // Visible darker background
+            scale: 0.95,  // Slightly smaller but keeps line height consistent
+            weight: 500,
+            rise: -200,  // Slight vertical adjustment for visual balance
         });
         tagTable.add(codeTag);
+        
+        // Code block: ```code block```
+        const codeBlockTag = new Gtk.TextTag({ 
+            name: 'code-block',
+            family: 'monospace',
+            foreground: this.colors.red,
+            paragraph_background: '#2a2a2a',  // Full-width background
+            scale: 0.95,
+            weight: 500,
+        });
+        tagTable.add(codeBlockTag);
         
         // Strikethrough: ~~text~~
         const strikeTag = new Gtk.TextTag({
@@ -531,6 +545,13 @@ class MarkdownRenderer {
                     return (headerMatch[1].length + 1) - posInLine;
                 }
                 
+                // Check for code block markers - skip over them when moving forward
+                const codeBlockMatch = line.match(/^```/);
+                if (codeBlockMatch && posInLine < 3 && movingForward) {
+                    // Jump past the backticks and to the next line
+                    return (line.length + 1) - posInLine;
+                }
+                
                 break;
             }
             
@@ -552,10 +573,42 @@ class MarkdownRenderer {
         const text = this.buffer.get_text(start, end, false);
         const lines = text.split('\n');
         let offset = 0;
+        let inCodeBlock = false;
+        let codeBlockStart = -1;
         
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
-            this._applyLineMarkdown(line, offset);
+            
+            // Check for code block markers
+            if (line.trim().startsWith('```')) {
+                if (!inCodeBlock) {
+                    // Starting a code block
+                    inCodeBlock = true;
+                    codeBlockStart = offset;
+                } else {
+                    // Ending a code block
+                    const blockEnd = offset + line.length;
+                    const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
+                    const blockEndIter = this.buffer.get_iter_at_offset(blockEnd);
+                    this.buffer.apply_tag_by_name('code-block', blockStart, blockEndIter);
+                    
+                    // Dim the backticks
+                    const startLineEnd = this.buffer.get_iter_at_offset(codeBlockStart + lines[i - (i - Math.max(0, text.substring(0, codeBlockStart).split('\n').length - 1))].length);
+                    this.buffer.apply_tag_by_name('dim', blockStart, startLineEnd);
+                    
+                    const endLineStart = this.buffer.get_iter_at_offset(offset);
+                    this.buffer.apply_tag_by_name('dim', endLineStart, blockEndIter);
+                    
+                    inCodeBlock = false;
+                    codeBlockStart = -1;
+                }
+            } else if (inCodeBlock) {
+                // Inside code block, will be styled when block ends
+            } else {
+                // Normal line processing
+                this._applyLineMarkdown(line, offset);
+            }
+            
             offset += line.length + 1; // +1 for newline
         }
         
@@ -700,6 +753,9 @@ class MarkdownRenderer {
     _applyMarkdownWithCursorContext(text, cursorOffset) {
         const lines = text.split('\n');
         let offset = 0;
+        let inCodeBlock = false;
+        let codeBlockStart = -1;
+        let codeBlockStartLine = -1;
         
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
@@ -708,7 +764,51 @@ class MarkdownRenderer {
             // Check if cursor is on this line
             const cursorOnLine = cursorOffset >= offset && cursorOffset <= lineEnd;
             
-            this._applyLineMarkdownWithCursor(line, offset, cursorOffset, cursorOnLine);
+            // Check for code block markers
+            if (line.trim().startsWith('```')) {
+                if (!inCodeBlock) {
+                    // Starting a code block
+                    inCodeBlock = true;
+                    codeBlockStart = offset;
+                    codeBlockStartLine = i;
+                } else {
+                    // Ending a code block
+                    const blockEnd = offset + line.length;
+                    const cursorInBlock = cursorOffset >= codeBlockStart && cursorOffset <= blockEnd;
+                    
+                    const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
+                    const blockEndIter = this.buffer.get_iter_at_offset(blockEnd);
+                    this.buffer.apply_tag_by_name('code-block', blockStart, blockEndIter);
+                    
+                    // Dim or hide the backticks based on cursor position
+                    if (cursorInBlock) {
+                        // Show backticks when cursor is in the block
+                        const startLine = text.split('\n')[codeBlockStartLine];
+                        const firstLineEnd = this.buffer.get_iter_at_offset(codeBlockStart + startLine.length);
+                        this.buffer.apply_tag_by_name('dim', blockStart, firstLineEnd);
+                        
+                        const endLineStart = this.buffer.get_iter_at_offset(offset);
+                        this.buffer.apply_tag_by_name('dim', endLineStart, blockEndIter);
+                    } else {
+                        // Hide backticks when cursor is outside
+                        const startLine = text.split('\n')[codeBlockStartLine];
+                        const firstLineEnd = this.buffer.get_iter_at_offset(codeBlockStart + startLine.length);
+                        this.buffer.apply_tag_by_name('invisible', blockStart, firstLineEnd);
+                        
+                        const endLineStart = this.buffer.get_iter_at_offset(offset);
+                        this.buffer.apply_tag_by_name('invisible', endLineStart, blockEndIter);
+                    }
+                    
+                    inCodeBlock = false;
+                    codeBlockStart = -1;
+                }
+            } else if (inCodeBlock) {
+                // Inside code block, will be styled when block ends
+            } else {
+                // Normal line processing
+                this._applyLineMarkdownWithCursor(line, offset, cursorOffset, cursorOnLine);
+            }
+            
             offset += line.length + 1; // +1 for newline
         }
     }
