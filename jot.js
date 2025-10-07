@@ -71,7 +71,8 @@ class ThemeManager {
             const match = line.match(/^(\w+)\s*=\s*"([^"]+)"/);
             if (match && (currentSection === 'normal' || currentSection === 'primary')) {
                 const [, key, value] = match;
-                colors[key] = value;
+                // Convert 0xRRGGBB to #RRGGBB for GTK CSS compatibility
+                colors[key] = value.replace(/^0x/, '#');
             }
         }
 
@@ -108,13 +109,30 @@ class ThemeManager {
 
     setupMonitor(callback) {
         try {
+            // Monitor Alacritty theme file
             const themePath = this._getThemePath();
             const file = Gio.File.new_for_path(themePath);
             this.monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
             this.monitor.connect('changed', () => {
+                print('Alacritty theme file changed, reloading...');
                 this.colors = this._loadColors();
                 callback();
             });
+            
+            // Also monitor GTK CSS file if it exists
+            const homeDir = GLib.get_home_dir();
+            const gtkCssPath = GLib.build_filenamev([homeDir, '.config', 'gtk-4.0', 'gtk.css']);
+            const gtkCssFile = Gio.File.new_for_path(gtkCssPath);
+            
+            if (gtkCssFile.query_exists(null)) {
+                this.gtkMonitor = gtkCssFile.monitor_file(Gio.FileMonitorFlags.NONE, null);
+                this.gtkMonitor.connect('changed', () => {
+                    print('GTK CSS file changed, reloading...');
+                    this.colors = this._loadColors();
+                    callback();
+                });
+                print('Monitoring GTK CSS file for changes');
+            }
         } catch (e) {
             print(`Failed to setup theme monitor: ${e.message}`);
         }
@@ -125,12 +143,12 @@ class ThemeManager {
         const zoom = zoomLevel / 100;
         return `
             window {
-                background: ${c.black};
+                background: ${c.background};
             }
 
             .jot-textview {
                 background: transparent;
-                color: ${c.white};
+                color: ${c.foreground};
                 font-size: ${15 * zoom}px;
                 font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', 'DejaVu Sans Mono', 'Courier New', monospace;
                 caret-color: ${c.white};
@@ -138,17 +156,17 @@ class ThemeManager {
 
             .jot-textview text {
                 background: transparent;
-                color: ${c.white};
+                color: ${c.foreground};
             }
             
             textview {
                 background: transparent;
-                color: ${c.white};
+                color: ${c.foreground};
             }
             
             textview > text {
                 background: transparent;
-                color: ${c.white};
+                color: ${c.foreground};
             }
 
             .jot-textview selection {
@@ -243,6 +261,139 @@ class ThemeManager {
                 background: ${c.white};
                 color: ${c.black};
             }
+
+            /* Dialog and FileChooser styling */
+            dialog, window.dialog {
+                background: ${c.background};
+                color: ${c.foreground};
+            }
+
+            dialog > box {
+                background: ${c.background};
+            }
+
+            filechooser, .filechooser {
+                background: ${c.background};
+                color: ${c.foreground};
+            }
+
+            filechooser > box {
+                background: ${c.background};
+            }
+
+            filechooser button {
+                background: ${c.black};
+                color: ${c.foreground};
+                border: 1px solid ${c.white};
+            }
+
+            filechooser button:hover {
+                background: ${c.white};
+                color: ${c.black};
+            }
+
+            filechooser entry {
+                background: ${c.black};
+                color: ${c.foreground};
+                border: 1px solid ${c.white};
+            }
+
+            filechooser treeview, filechooser listview {
+                background: ${c.background};
+                color: ${c.foreground};
+            }
+
+            filechooser scrolledwindow {
+                background: ${c.background};
+            }
+
+            /* Sidebar styling */
+            .sidebar, sidebar {
+                background: ${c.black};
+                color: ${c.foreground};
+            }
+
+            .sidebar row, sidebar row {
+                background: ${c.black};
+                color: ${c.foreground};
+            }
+
+            .sidebar row:selected, sidebar row:selected {
+                background: ${c.blue};
+                color: ${c.foreground};
+            }
+
+            /* Pathbar styling */
+            .pathbar, pathbar {
+                background: ${c.black};
+                color: ${c.foreground};
+            }
+
+            /* List and tree view styling */
+            treeview, listview, list {
+                background: ${c.background};
+                color: ${c.foreground};
+            }
+
+            treeview:selected, listview:selected, list row:selected {
+                background: ${c.blue};
+                color: ${c.foreground};
+            }
+
+            /* Scrollbar styling - thin and minimal */
+            scrollbar {
+                background: transparent;
+            }
+
+            scrollbar.vertical slider {
+                min-width: 4px;
+                min-height: 40px;
+                background: rgba(255, 255, 255, 0.3);
+                border-radius: 2px;
+                margin: 2px;
+            }
+
+            scrollbar.horizontal slider {
+                min-height: 4px;
+                min-width: 40px;
+                background: rgba(255, 255, 255, 0.3);
+                border-radius: 2px;
+                margin: 2px;
+            }
+
+            scrollbar slider:hover {
+                background: rgba(255, 255, 255, 0.5);
+            }
+            
+            scrollbar slider:active {
+                background: ${c.blue};
+            }
+
+            /* Popover styling */
+            popover, .popover {
+                background: ${c.background};
+                color: ${c.foreground};
+                border: 1px solid ${c.white};
+            }
+
+            popover > contents {
+                background: ${c.background};
+            }
+
+            /* Menu styling */
+            menu, .menu {
+                background: ${c.background};
+                color: ${c.foreground};
+                border: 1px solid ${c.white};
+            }
+
+            menuitem {
+                color: ${c.foreground};
+            }
+
+            menuitem:hover {
+                background: ${c.blue};
+            }
         `;
     }
 }
@@ -267,7 +418,7 @@ class MarkdownRenderer {
         const tagTable = this.buffer.get_tag_table();
         
         // Remove existing tags if they exist
-        ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'link', 'link-url', 
+        ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
          'bullet', 'dim', 'invisible'].forEach(name => {
             const existing = tagTable.lookup(name);
@@ -287,7 +438,7 @@ class MarkdownRenderer {
             name: 'code',
             family: 'monospace',
             foreground: this.colors.red,
-            background: '#2a2a2a',  // Visible darker background
+            background: this.colors.black,  // Use theme's black color for background
             scale: 0.95,  // Slightly smaller but keeps line height consistent
             weight: 500,
             rise: -200,  // Slight vertical adjustment for visual balance
@@ -299,7 +450,7 @@ class MarkdownRenderer {
             name: 'code-block',
             family: 'monospace',
             foreground: this.colors.red,
-            paragraph_background: '#2a2a2a',  // Full-width background
+            paragraph_background: this.colors.black,  // Use theme's black color for background
             scale: 0.95,
             weight: 500,
         });
@@ -312,6 +463,14 @@ class MarkdownRenderer {
             foreground: this.colors.red,
         });
         tagTable.add(strikeTag);
+        
+        // Underline: ++text++
+        const underlineTag = new Gtk.TextTag({
+            name: 'underline',
+            underline: 1,  // Pango.Underline.SINGLE
+            foreground: this.colors.cyan,
+        });
+        tagTable.add(underlineTag);
         
         // Links: [text](url)
         const linkTag = new Gtk.TextTag({
@@ -486,13 +645,14 @@ class MarkdownRenderer {
             if (cursorOffset >= lineStart && cursorOffset <= lineEnd) {
                 const posInLine = cursorOffset - lineStart;
                 
-                // Check inline patterns: bold, italic, code, strikethrough, links
+                // Check inline patterns: bold, italic, code, strikethrough, underline, links
                 const patterns = [
                     { regex: /`([^`]+?)`/g, openLen: 1, closeLen: 1 },           // code
                     { regex: /(\*\*|__)(.+?)\1/g, openLen: 2, closeLen: 2 },    // bold
                     { regex: /\*([^\*]+?)\*/g, openLen: 1, closeLen: 1 },       // italic *
                     { regex: /_([^_]+?)_/g, openLen: 1, closeLen: 1 },          // italic _
                     { regex: /~~(.+?)~~/g, openLen: 2, closeLen: 2 },           // strikethrough
+                    { regex: /\+\+(.+?)\+\+/g, openLen: 2, closeLen: 2 },       // underline
                     { regex: /\[(.+?)\]\((.+?)\)/g, openLen: 1, closeLen: 0 },  // links (special)
                 ];
                 
@@ -571,34 +731,46 @@ class MarkdownRenderer {
         // Remove all tags
         this.buffer.remove_all_tags(start, end);
         
-        const text = this.buffer.get_text(start, end, false);
-        const lines = text.split('\n');
-        let offset = 0;
+        // Iterate using TextIter to get correct byte offsets (handles multi-byte chars like emojis)
+        let iter = this.buffer.get_start_iter();
         let inCodeBlock = false;
         let codeBlockStart = -1;
+        let lineNum = 0;
         
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
+        do {
+            const lineStart = iter.copy();
+            
+            // Move to end of line
+            if (!iter.ends_line()) {
+                iter.forward_to_line_end();
+            }
+            const lineEnd = iter.copy();
+            
+            // Get line text and byte offset
+            const lineText = this.buffer.get_text(lineStart, lineEnd, false);
+            const lineOffset = lineStart.get_offset();
             
             // Check for code block markers
-            if (line.trim().startsWith('```')) {
+            if (lineText.trim().startsWith('```')) {
                 if (!inCodeBlock) {
                     // Starting a code block
                     inCodeBlock = true;
-                    codeBlockStart = offset;
+                    codeBlockStart = lineOffset;
                 } else {
                     // Ending a code block
-                    const blockEnd = offset + line.length;
                     const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-                    const blockEndIter = this.buffer.get_iter_at_offset(blockEnd);
-                    this.buffer.apply_tag_by_name('code-block', blockStart, blockEndIter);
+                    this.buffer.apply_tag_by_name('code-block', blockStart, lineEnd);
                     
-                    // Dim the backticks
-                    const startLineEnd = this.buffer.get_iter_at_offset(codeBlockStart + lines[i - (i - Math.max(0, text.substring(0, codeBlockStart).split('\n').length - 1))].length);
-                    this.buffer.apply_tag_by_name('dim', blockStart, startLineEnd);
+                    // Dim the backticks on start line
+                    const codeBlockStartIter = this.buffer.get_iter_at_offset(codeBlockStart);
+                    const codeBlockStartEnd = codeBlockStartIter.copy();
+                    if (!codeBlockStartEnd.ends_line()) {
+                        codeBlockStartEnd.forward_to_line_end();
+                    }
+                    this.buffer.apply_tag_by_name('dim', codeBlockStartIter, codeBlockStartEnd);
                     
-                    const endLineStart = this.buffer.get_iter_at_offset(offset);
-                    this.buffer.apply_tag_by_name('dim', endLineStart, blockEndIter);
+                    // Dim the backticks on end line
+                    this.buffer.apply_tag_by_name('dim', lineStart, lineEnd);
                     
                     inCodeBlock = false;
                     codeBlockStart = -1;
@@ -607,11 +779,11 @@ class MarkdownRenderer {
                 // Inside code block, will be styled when block ends
             } else {
                 // Normal line processing
-                this._applyLineMarkdown(line, offset);
+                this._applyLineMarkdown(lineText, lineOffset);
             }
             
-            offset += line.length + 1; // +1 for newline
-        }
+            lineNum++;
+        } while (iter.forward_line());
         
         this.updating = false;
     }
@@ -630,7 +802,7 @@ class MarkdownRenderer {
             // Hide the hashes by default (will be shown when cursor is on line)
             const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space
             this.buffer.apply_tag_by_name('invisible', start, hashEnd);
-            return;
+            // Don't return - continue to apply inline formatting to header content
         }
         
         // Bullet points (must be at start of line or after whitespace)
@@ -655,6 +827,9 @@ class MarkdownRenderer {
         
         // Strikethrough: ~~text~~
         this._applyPattern(line, lineOffset, /~~(.+?)~~/g, 'strikethrough');
+        
+        // Underline: ++text++
+        this._applyPattern(line, lineOffset, /\+\+(.+?)\+\+/g, 'underline');
         
         // Links: [text](url)
         this._applyLinkPattern(line, lineOffset);
@@ -807,66 +982,74 @@ class MarkdownRenderer {
     }
     
     _applyMarkdownWithCursorContext(text, cursorOffset) {
-        const lines = text.split('\n');
-        let offset = 0;
+        // Iterate using TextIter to get correct byte offsets (handles multi-byte chars like emojis)
+        let iter = this.buffer.get_start_iter();
         let inCodeBlock = false;
         let codeBlockStart = -1;
-        let codeBlockStartLine = -1;
+        let codeBlockStartIter = null;
         
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            const lineEnd = offset + line.length;
+        do {
+            const lineStart = iter.copy();
+            
+            // Move to end of line
+            if (!iter.ends_line()) {
+                iter.forward_to_line_end();
+            }
+            const lineEnd = iter.copy();
+            
+            // Get line text and byte offset
+            const lineText = this.buffer.get_text(lineStart, lineEnd, false);
+            const lineOffset = lineStart.get_offset();
+            const lineEndOffset = lineEnd.get_offset();
             
             // Check if cursor is on this line
-            const cursorOnLine = cursorOffset >= offset && cursorOffset <= lineEnd;
+            const cursorOnLine = cursorOffset >= lineOffset && cursorOffset <= lineEndOffset;
             
             // Check for code block markers
-            if (line.trim().startsWith('```')) {
+            if (lineText.trim().startsWith('```')) {
                 if (!inCodeBlock) {
                     // Starting a code block
                     inCodeBlock = true;
-                    codeBlockStart = offset;
-                    codeBlockStartLine = i;
+                    codeBlockStart = lineOffset;
+                    codeBlockStartIter = lineStart.copy();
                 } else {
                     // Ending a code block
-                    const blockEnd = offset + line.length;
-                    const cursorInBlock = cursorOffset >= codeBlockStart && cursorOffset <= blockEnd;
+                    const cursorInBlock = cursorOffset >= codeBlockStart && cursorOffset <= lineEndOffset;
                     
                     const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-                    const blockEndIter = this.buffer.get_iter_at_offset(blockEnd);
-                    this.buffer.apply_tag_by_name('code-block', blockStart, blockEndIter);
+                    this.buffer.apply_tag_by_name('code-block', blockStart, lineEnd);
                     
                     // Dim or hide the backticks based on cursor position
                     if (cursorInBlock) {
                         // Show backticks when cursor is in the block
-                        const startLine = text.split('\n')[codeBlockStartLine];
-                        const firstLineEnd = this.buffer.get_iter_at_offset(codeBlockStart + startLine.length);
-                        this.buffer.apply_tag_by_name('dim', blockStart, firstLineEnd);
-                        
-                        const endLineStart = this.buffer.get_iter_at_offset(offset);
-                        this.buffer.apply_tag_by_name('dim', endLineStart, blockEndIter);
+                        const codeBlockStartEnd = codeBlockStartIter.copy();
+                        if (!codeBlockStartEnd.ends_line()) {
+                            codeBlockStartEnd.forward_to_line_end();
+                        }
+                        this.buffer.apply_tag_by_name('dim', codeBlockStartIter, codeBlockStartEnd);
+                        this.buffer.apply_tag_by_name('dim', lineStart, lineEnd);
                     } else {
                         // Hide backticks when cursor is outside
-                        const startLine = text.split('\n')[codeBlockStartLine];
-                        const firstLineEnd = this.buffer.get_iter_at_offset(codeBlockStart + startLine.length);
-                        this.buffer.apply_tag_by_name('invisible', blockStart, firstLineEnd);
-                        
-                        const endLineStart = this.buffer.get_iter_at_offset(offset);
-                        this.buffer.apply_tag_by_name('invisible', endLineStart, blockEndIter);
+                        const codeBlockStartEnd = codeBlockStartIter.copy();
+                        if (!codeBlockStartEnd.ends_line()) {
+                            codeBlockStartEnd.forward_to_line_end();
+                        }
+                        this.buffer.apply_tag_by_name('invisible', codeBlockStartIter, codeBlockStartEnd);
+                        this.buffer.apply_tag_by_name('invisible', lineStart, lineEnd);
                     }
                     
                     inCodeBlock = false;
                     codeBlockStart = -1;
+                    codeBlockStartIter = null;
                 }
             } else if (inCodeBlock) {
                 // Inside code block, will be styled when block ends
             } else {
                 // Normal line processing
-                this._applyLineMarkdownWithCursor(line, offset, cursorOffset, cursorOnLine);
+                this._applyLineMarkdownWithCursor(lineText, lineOffset, cursorOffset, cursorOnLine);
             }
             
-            offset += line.length + 1; // +1 for newline
-        }
+        } while (iter.forward_line());
     }
     
     _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine) {
@@ -889,7 +1072,7 @@ class MarkdownRenderer {
                 // Cursor is on a different line - hide the hashes
                 this.buffer.apply_tag_by_name('invisible', start, hashEnd);
             }
-            return;
+            // Don't return - continue to apply inline formatting to header content
         }
         
         // Bullet points
@@ -910,6 +1093,7 @@ class MarkdownRenderer {
         // For italic, we need to avoid matching ** by checking the character isn't an asterisk
         this._applyItalicPattern(line, lineOffset, cursorOffset);
         this._applyPatternWithCursor(line, lineOffset, cursorOffset, /~~(.+?)~~/g, 'strikethrough');
+        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /\+\+(.+?)\+\+/g, 'underline');
         this._applyLinkPatternWithCursor(line, lineOffset, cursorOffset);
     }
     
@@ -1277,8 +1461,6 @@ class JotWindow extends Adw.ApplicationWindow {
         const keyController = new Gtk.EventControllerKey();
         
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
-            print(`BulletList handler: keyval=${keyval}, keycode=${keycode}, state=${state}`);
-            
             // Get current position and line
             const cursor = buffer.get_insert();
             const iter = buffer.get_iter_at_mark(cursor);
@@ -1310,8 +1492,6 @@ class JotWindow extends Adw.ApplicationWindow {
                 lineText = lines[lines.length - 1] || '';
                 lineStartOffset = offset;
             }
-            
-            print(`Current line: "${lineText}"`);
             
             // Handle Enter key (65293)
             if (keyval === 65293 && !(state & CTRL_MASK)) {
@@ -1441,17 +1621,76 @@ class JotWindow extends Adw.ApplicationWindow {
 
     _setupTheme() {
         this._applyCSS();
-        this._themeManager.setupMonitor(() => this._applyCSS());
+        this._themeManager.setupMonitor(() => {
+            print('Theme file changed, reloading...');
+            this._reloadTheme();
+        });
+        
+        // Also monitor GTK theme changes from the system
+        const gtkSettings = Gtk.Settings.get_default();
+        if (gtkSettings) {
+            let reloadTimeout = null;
+            
+            // Monitor when GTK theme name changes
+            gtkSettings.connect('notify::gtk-theme-name', () => {
+                print('GTK theme changed, scheduling reload...');
+                if (reloadTimeout) GLib.source_remove(reloadTimeout);
+                reloadTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                    this._reloadTheme();
+                    reloadTimeout = null;
+                    return GLib.SOURCE_REMOVE;
+                });
+            });
+            
+            // Monitor dark mode preference changes
+            gtkSettings.connect('notify::gtk-application-prefer-dark-theme', () => {
+                print('Dark mode preference changed, scheduling reload...');
+                if (reloadTimeout) GLib.source_remove(reloadTimeout);
+                reloadTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                    this._reloadTheme();
+                    reloadTimeout = null;
+                    return GLib.SOURCE_REMOVE;
+                });
+            });
+            
+            print('GTK theme monitoring enabled');
+        }
+    }
+    
+    _reloadTheme() {
+        print('Reloading theme completely...');
+        // Reload colors from file
+        const oldBackground = this._themeManager.colors.background;
+        this._themeManager.colors = this._themeManager._loadColors();
+        const newBackground = this._themeManager.colors.background;
+        print(`Background color changed from ${oldBackground} to ${newBackground}`);
+        // Apply new CSS
+        this._applyCSS();
+        // Force a full redraw
+        this.queue_draw();
+        if (this._textView) {
+            this._textView.queue_draw();
+        }
+        print('Theme reload complete');
     }
 
     _applyCSS() {
-        const cssProvider = new Gtk.CssProvider();
+        // Remove old CSS provider if it exists
+        if (this._cssProvider) {
+            Gtk.StyleContext.remove_provider_for_display(
+                this.get_display(),
+                this._cssProvider
+            );
+        }
+        
+        // Create and apply new CSS provider
+        this._cssProvider = new Gtk.CssProvider();
         const css = this._themeManager.generateCSS(this._zoomLevel);
-        cssProvider.load_from_data(css, -1);
+        this._cssProvider.load_from_data(css, -1);
         Gtk.StyleContext.add_provider_for_display(
             this.get_display(),
-            cssProvider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            this._cssProvider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1  // Higher priority to override system theme
         );
         
         // Update markdown renderer colors
@@ -1497,7 +1736,7 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _extractTitleFromContent() {
-        const buffer = this._textView.get_buffer();
+            const buffer = this._textView.get_buffer();
         const [start, end] = buffer.get_bounds();
         const content = buffer.get_text(start, end, false);
         
