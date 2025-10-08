@@ -15,6 +15,7 @@ const FEEDBACK_TIMEOUT_MS = 3000;
 const KEY_ESCAPE = 65307;
 const KEY_ENTER = 65293;
 const KEY_S = 115;
+const KEY_N = 110;       // 'n' key
 const KEY_PLUS = 61;     // '+' key (also '=' key without shift)
 const KEY_MINUS = 45;    // '-' key
 const KEY_0 = 48;        // '0' key
@@ -457,9 +458,24 @@ class MarkdownRenderer {
         const tagTable = this.buffer.get_tag_table();
         
         // Remove existing tags if they exist
-        ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
+        const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'bullet', 'dim', 'invisible'].forEach(name => {
+         'bullet', 'dim', 'invisible',
+         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
+        
+        // Add gradient background tags to removal list for all moods
+        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
+                          'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
+                          'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
+        for (const moodName of moodNames) {
+            for (let level = 1; level <= 6; level++) {
+                for (let i = 0; i < 30; i++) {
+                    tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
+                }
+            }
+        }
+        
+        tagsToRemove.forEach(name => {
             const existing = tagTable.lookup(name);
             if (existing) tagTable.remove(existing);
         });
@@ -524,48 +540,160 @@ class MarkdownRenderer {
         });
         tagTable.add(linkUrlTag);
         
-        // Headers: # Header
-        const h1Tag = new Gtk.TextTag({
-            name: 'heading1',
-            scale: 1.8,
-            weight: 700,
-        });
-        tagTable.add(h1Tag);
+        // Headers: # Header (base styles without background, background applied per-character for gradient)
+        const scales = [5.4, 4.5, 3.6, 3.3, 3.15, 3.0];
+        for (let i = 1; i <= 6; i++) {
+            const tag = new Gtk.TextTag({
+                name: `heading${i}`,
+                scale: scales[i-1],
+                weight: 400,
+                family: 'pxlxxl',
+            });
+            tagTable.add(tag);
+        }
         
-        const h2Tag = new Gtk.TextTag({
-            name: 'heading2',
-            scale: 1.5,
-            weight: 700,
-        });
-        tagTable.add(h2Tag);
+        // Define color moods with gradient palettes (2 or 3 colors) - in custom order
+        const moods = {
+            metal: { colors: ['#4A5568', '#CBD5E0'] },
+            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
+            fire: { colors: ['#FF4500', '#FFD700'] },
+            forest: { colors: ['#228B22', '#90EE90'] },
+            lava: { colors: ['#8B0000', '#FF4500'] },
+            mint: { colors: ['#00C9A7', '#C7FFED'] },
+            amber: { colors: ['#FF8C00', '#FFE4B5'] },
+            ocean: { colors: ['#006994', '#63B8FF'] },
+            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
+            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
+            stone: { colors: ['#708090', '#B0B8C0'] },
+            ice: { colors: ['#00CED1', '#E0FFFF'] },
+            purple: { colors: ['#6A0DAD', '#DA70D6'] },
+            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
+            royal: { colors: ['#4169E1', '#B0C4DE'] },
+            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
+            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
+            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
+            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
+            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
+            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
+            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
+            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
+            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
+            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
+            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
+            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
+            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
+            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
+            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
+            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
+            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
+            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
+            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
+        };
         
-        const h3Tag = new Gtk.TextTag({
-            name: 'heading3',
-            scale: 1.2,
-            weight: 700,
-        });
-        tagTable.add(h3Tag);
+        this.moodNames = Object.keys(moods);
+        this.moodGradients = {};
         
-        const h4Tag = new Gtk.TextTag({
-            name: 'heading4',
-            scale: 1.1,
-            weight: 700,
-        });
-        tagTable.add(h4Tag);
+        // Helper function to parse hex color
+        const parseColor = (hex) => {
+            return {
+                r: parseInt(hex.slice(1, 3), 16),
+                g: parseInt(hex.slice(3, 5), 16),
+                b: parseInt(hex.slice(5, 7), 16)
+            };
+        };
         
-        const h5Tag = new Gtk.TextTag({
-            name: 'heading5',
-            scale: 1.05,
-            weight: 700,
-        });
-        tagTable.add(h5Tag);
+        // Helper function to create hex from RGB
+        const toHex = (r, g, b) => {
+            return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+        };
         
-        const h6Tag = new Gtk.TextTag({
-            name: 'heading6',
-            scale: 1.0,
-            weight: 700,
-        });
-        tagTable.add(h6Tag);
+        // Generate gradient steps for each mood that loops smoothly
+        const steps = 30;
+        for (const [moodName, moodData] of Object.entries(moods)) {
+            const gradientColors = [];
+            const palette = moodData.colors.map(parseColor);
+            
+            if (palette.length === 2) {
+                // 2-color gradient: there and back
+                const halfSteps = Math.floor(steps / 2);
+                
+                // First half: color 0 to color 1
+                for (let i = 0; i < halfSteps; i++) {
+                    const ratio = i / (halfSteps - 1);
+                    const r = Math.round(palette[0].r + (palette[1].r - palette[0].r) * ratio);
+                    const g = Math.round(palette[0].g + (palette[1].g - palette[0].g) * ratio);
+                    const b = Math.round(palette[0].b + (palette[1].b - palette[0].b) * ratio);
+                    gradientColors.push(toHex(r, g, b));
+                }
+                
+                // Second half: color 1 back to color 0
+                for (let i = 0; i < halfSteps; i++) {
+                    const ratio = i / (halfSteps - 1);
+                    const r = Math.round(palette[1].r + (palette[0].r - palette[1].r) * ratio);
+                    const g = Math.round(palette[1].g + (palette[0].g - palette[1].g) * ratio);
+                    const b = Math.round(palette[1].b + (palette[0].b - palette[1].b) * ratio);
+                    gradientColors.push(toHex(r, g, b));
+                }
+            } else if (palette.length === 3) {
+                // 3-color gradient: 0->1->2->1->0 for smooth looping
+                const segmentSteps = Math.floor(steps / 4);
+                
+                // Segment 1: color 0 to color 1
+                for (let i = 0; i < segmentSteps; i++) {
+                    const ratio = i / (segmentSteps - 1 || 1);
+                    const r = Math.round(palette[0].r + (palette[1].r - palette[0].r) * ratio);
+                    const g = Math.round(palette[0].g + (palette[1].g - palette[0].g) * ratio);
+                    const b = Math.round(palette[0].b + (palette[1].b - palette[0].b) * ratio);
+                    gradientColors.push(toHex(r, g, b));
+                }
+                
+                // Segment 2: color 1 to color 2
+                for (let i = 0; i < segmentSteps; i++) {
+                    const ratio = i / (segmentSteps - 1 || 1);
+                    const r = Math.round(palette[1].r + (palette[2].r - palette[1].r) * ratio);
+                    const g = Math.round(palette[1].g + (palette[2].g - palette[1].g) * ratio);
+                    const b = Math.round(palette[1].b + (palette[2].b - palette[1].b) * ratio);
+                    gradientColors.push(toHex(r, g, b));
+                }
+                
+                // Segment 3: color 2 back to color 1
+                for (let i = 0; i < segmentSteps; i++) {
+                    const ratio = i / (segmentSteps - 1 || 1);
+                    const r = Math.round(palette[2].r + (palette[1].r - palette[2].r) * ratio);
+                    const g = Math.round(palette[2].g + (palette[1].g - palette[2].g) * ratio);
+                    const b = Math.round(palette[2].b + (palette[1].b - palette[2].b) * ratio);
+                    gradientColors.push(toHex(r, g, b));
+                }
+                
+                // Segment 4: color 1 back to color 0
+                for (let i = 0; i < segmentSteps; i++) {
+                    const ratio = i / (segmentSteps - 1 || 1);
+                    const r = Math.round(palette[1].r + (palette[0].r - palette[1].r) * ratio);
+                    const g = Math.round(palette[1].g + (palette[0].g - palette[1].g) * ratio);
+                    const b = Math.round(palette[1].b + (palette[0].b - palette[1].b) * ratio);
+                    gradientColors.push(toHex(r, g, b));
+                }
+            }
+            
+            this.moodGradients[moodName] = gradientColors;
+        }
+        
+        // Create gradient foreground color tags for each mood, heading level, and color step
+        for (const moodName of this.moodNames) {
+            const gradientColors = this.moodGradients[moodName];
+            for (let level = 1; level <= 6; level++) {
+                for (let i = 0; i < gradientColors.length; i++) {
+                    const tag = new Gtk.TextTag({
+                        name: `gradient-${moodName}-h${level}-${i}`,
+                        scale: scales[level-1],
+                        weight: 400,
+                        family: 'pxlxxl',
+                        foreground: gradientColors[i],
+                    });
+                    tagTable.add(tag);
+                }
+            }
+        }
         
         // Bullet points: - or * (fainter than text)
         const bulletTag = new Gtk.TextTag({
@@ -582,6 +710,17 @@ class MarkdownRenderer {
             scale: 0.8,
         });
         tagTable.add(dimTag);
+        
+        // Dim tags for each heading level (matching header scale)
+        for (let i = 1; i <= 6; i++) {
+            const dimHeadingTag = new Gtk.TextTag({
+                name: `dim-h${i}`,
+                foreground: this.colors.cyan,
+                scale: scales[i-1],
+                family: 'pxlxxl',
+            });
+            tagTable.add(dimHeadingTag);
+        }
         
         // Invisible tag for markdown syntax (when cursor is outside)
         const invisibleTag = new Gtk.TextTag({
@@ -830,7 +969,7 @@ class MarkdownRenderer {
                 // Inside code block, will be styled when block ends
             } else {
                 // Normal line processing
-                this._applyLineMarkdown(lineText, lineOffset);
+                this._applyLineMarkdown(lineText, lineOffset, lineNum);
             }
             
             lineNum++;
@@ -839,20 +978,33 @@ class MarkdownRenderer {
         this.updating = false;
     }
     
-    _applyLineMarkdown(line, lineOffset) {
-        // Headers (must be at start of line)
-        const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    _applyLineMarkdown(line, lineOffset, lineNum) {
+        // Headers (must be at start of line) - support any number of hashes
+        const headerMatch = line.match(/^(#{1,})\s+(.+)$/);
         if (headerMatch) {
             const [, hashes, content] = headerMatch;
-            const level = hashes.length;
+            const actualLevel = hashes.length; // Actual number of hashes
+            const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
             const start = this.buffer.get_iter_at_offset(lineOffset);
-            const end = this.buffer.get_iter_at_offset(lineOffset + line.length);
-            
-            this.buffer.apply_tag_by_name(`heading${level}`, start, end);
             
             // Hide the hashes by default (will be shown when cursor is on line)
             const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space
             this.buffer.apply_tag_by_name('invisible', start, hashEnd);
+            
+            // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
+            const moodIndex = (actualLevel - 1) % this.moodNames.length;
+            const mood = this.moodNames[moodIndex];
+            const gradientColors = this.moodGradients[mood];
+            
+            // Apply gradient with 45-degree diagonal pattern
+            const contentStart = lineOffset + hashes.length + 1;
+            for (let i = 0; i < content.length; i++) {
+                const charStart = this.buffer.get_iter_at_offset(contentStart + i);
+                const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
+                // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
+                const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
+                this.buffer.apply_tag_by_name(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+            }
             // Don't return - continue to apply inline formatting to header content
         }
         
@@ -1038,6 +1190,7 @@ class MarkdownRenderer {
         let inCodeBlock = false;
         let codeBlockStart = -1;
         let codeBlockStartIter = null;
+        let lineNum = 0;
         
         do {
             const lineStart = iter.copy();
@@ -1097,31 +1250,45 @@ class MarkdownRenderer {
                 // Inside code block, will be styled when block ends
             } else {
                 // Normal line processing
-                this._applyLineMarkdownWithCursor(lineText, lineOffset, cursorOffset, cursorOnLine);
+                this._applyLineMarkdownWithCursor(lineText, lineOffset, cursorOffset, cursorOnLine, lineNum);
             }
             
+            lineNum++;
         } while (iter.forward_line());
     }
     
-    _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine) {
-        // Headers (must be at start of line)
-        const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine, lineNum) {
+        // Headers (must be at start of line) - support any number of hashes
+        const headerMatch = line.match(/^(#{1,})\s+(.+)$/);
         if (headerMatch) {
             const [, hashes, content] = headerMatch;
-            const level = hashes.length;
+            const actualLevel = hashes.length; // Actual number of hashes
+            const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
             const start = this.buffer.get_iter_at_offset(lineOffset);
-            const end = this.buffer.get_iter_at_offset(lineOffset + line.length);
-            
-            this.buffer.apply_tag_by_name(`heading${level}`, start, end);
             
             // Show/hide the hashes based on cursor position
             const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space after #
             if (cursorOnLine) {
-                // Cursor is on this line - show hashes with dim tag
-                this.buffer.apply_tag_by_name('dim', start, hashEnd);
+                // Cursor is on this line - show hashes with level-specific dim tag
+                this.buffer.apply_tag_by_name(`dim-h${styleLevel}`, start, hashEnd);
             } else {
                 // Cursor is on a different line - hide the hashes
                 this.buffer.apply_tag_by_name('invisible', start, hashEnd);
+            }
+            
+            // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
+            const moodIndex = (actualLevel - 1) % this.moodNames.length;
+            const mood = this.moodNames[moodIndex];
+            const gradientColors = this.moodGradients[mood];
+            
+            // Apply gradient with 45-degree diagonal pattern
+            const contentStart = lineOffset + hashes.length + 1;
+            for (let i = 0; i < content.length; i++) {
+                const charStart = this.buffer.get_iter_at_offset(contentStart + i);
+                const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
+                // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
+                const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
+                this.buffer.apply_tag_by_name(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
             }
             // Don't return - continue to apply inline formatting to header content
         }
@@ -1781,6 +1948,10 @@ class JotWindow extends Adw.ApplicationWindow {
                 this._saveNote();
                 return true;
             }
+            if (keyval === KEY_N && (state & CTRL_MASK)) {
+                this._newFile();
+                return true;
+            }
             // Zoom in: Ctrl + or Ctrl = (multiple keycodes for compatibility)
             if ((keyval === KEY_PLUS || keyval === 43 || keyval === 61 || keyval === 65451 || keyval === 65455) && (state & CTRL_MASK)) {
                 this._zoomIn();
@@ -1829,6 +2000,27 @@ class JotWindow extends Adw.ApplicationWindow {
 
         const jotDir = FileManager.getJotDirectory();
         this._pathLabel.set_label(GLib.build_filenamev([jotDir, this._currentFilename]));
+    }
+
+    _newFile() {
+        // Clear the current file path to start fresh
+        this._currentFilePath = null;
+        this._currentFilename = 'untitled.md';
+        
+        // Set buffer with default header (today's date)
+        const buffer = this._textView.get_buffer();
+        const now = GLib.DateTime.new_now_local();
+        const todayDate = now.format('%Y-%m-%d');
+        const initialText = `# ${todayDate}`;
+        buffer.set_text(initialText, -1);
+        
+        // Position cursor at the end
+        const iter = buffer.get_iter_at_offset(initialText.length);
+        buffer.place_cursor(iter);
+        
+        // Update filename display and focus
+        this._updateFilenameDisplay();
+        this._textView.grab_focus();
     }
 
     _saveNote() {
