@@ -3,7 +3,7 @@
 imports.gi.versions.Gtk = '4.0';
 imports.gi.versions.Adw = '1';
 
-const { Gtk, Gio, GLib, Adw, GObject } = imports.gi;
+const { Gtk, Gio, GLib, Adw, GObject, Gdk } = imports.gi;
 
 // Constants
 const APP_ID = 'com.github.jot';
@@ -16,9 +16,12 @@ const KEY_ESCAPE = 65307;
 const KEY_ENTER = 65293;
 const KEY_S = 115;
 const KEY_N = 110;       // 'n' key
+const KEY_X = 120;       // 'x' key
 const KEY_PLUS = 61;     // '+' key (also '=' key without shift)
 const KEY_MINUS = 45;    // '-' key
 const KEY_0 = 48;        // '0' key
+const KEY_UP = 65362;    // Up arrow key
+const KEY_DOWN = 65364;  // Down arrow key
 const CTRL_MASK = 4;
 
 // File patterns
@@ -454,13 +457,29 @@ class MarkdownRenderer {
             b.toString(16).padStart(2, '0');
     }
     
+    _colorWithOpacity(color, opacity) {
+        // Parse hex color and convert to RGBA with opacity
+        const hex = color.replace('#', '');
+        const r = parseInt(hex.substr(0, 2), 16) / 255;
+        const g = parseInt(hex.substr(2, 2), 16) / 255;
+        const b = parseInt(hex.substr(4, 2), 16) / 255;
+        
+        // Return GdkRGBA object
+        const rgba = new Gdk.RGBA();
+        rgba.red = r;
+        rgba.green = g;
+        rgba.blue = b;
+        rgba.alpha = opacity;
+        return rgba;
+    }
+    
     _initTags() {
         const tagTable = this.buffer.get_tag_table();
         
         // Remove existing tags if they exist
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'bullet', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
+         'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
         
         // Add gradient background tags to removal list for all moods
@@ -695,13 +714,26 @@ class MarkdownRenderer {
             }
         }
         
-        // Bullet character styling: - or * (fainter than text)
-        const bulletCharTag = new Gtk.TextTag({
-            name: 'bullet-char',
-            foreground: this.colors.foreground,
-            scale: 0.9,
+        // Bullet character styling for dash "-" (with reduced opacity, same weight)
+        const bulletDashTag = new Gtk.TextTag({
+            name: 'bullet-dash',
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.5),
         });
-        tagTable.add(bulletCharTag);
+        tagTable.add(bulletDashTag);
+        
+        // Bullet character styling for asterisk "*" when cursor is far (faint like dash)
+        const bulletStarTag = new Gtk.TextTag({
+            name: 'bullet-star',
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.5),
+        });
+        tagTable.add(bulletStarTag);
+        
+        // Bullet character styling for asterisk "*" when cursor is nearby (visible, dimmed)
+        const bulletStarNearTag = new Gtk.TextTag({
+            name: 'bullet-star-near',
+            foreground: this.colors.cyan,
+        });
+        tagTable.add(bulletStarNearTag);
         
         // Bullet line margins: persistent margins for main bullets
         const bulletMarginTag = new Gtk.TextTag({
@@ -985,7 +1017,7 @@ class MarkdownRenderer {
         // Remove syntax tags but preserve margin tags
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char',
+         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
         
         // Add gradient background tags to removal list for all moods
@@ -1310,7 +1342,7 @@ class MarkdownRenderer {
         // Remove syntax tags but preserve margin tags
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char',
+         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
         
         // Add gradient background tags to removal list for all moods
@@ -1449,17 +1481,33 @@ class MarkdownRenderer {
             // Don't return - continue to apply inline formatting to header content
         }
         
-        // Bullet points
+        // Bullet points - handle * and - bullets
         const bulletMatch = line.match(/^(\s*)([-*])\s+(.+)$/);
         if (bulletMatch) {
             const [, indent, bullet] = bulletMatch;
-            const bulletStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
-            const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
+            const bulletPos = lineOffset + indent.length;
+            const bulletStart = this.buffer.get_iter_at_offset(bulletPos);
+            const bulletEnd = this.buffer.get_iter_at_offset(bulletPos + 1);
             
-            // Apply bullet character styling
-            this.buffer.apply_tag_by_name('bullet-char', bulletStart, bulletEnd);
+            // Check if cursor is right next to the bullet (at or adjacent to bullet position)
+            const cursorNearBullet = cursorOffset >= bulletPos && cursorOffset <= bulletPos + 2;
             
-            // Apply margin styling to the entire line (only if not already applied)
+            // Apply styling ONLY - never modify buffer content
+            if (bullet === '-') {
+                // Dash bullet: always show with reduced opacity
+                this.buffer.apply_tag_by_name('bullet-dash', bulletStart, bulletEnd);
+            } else if (bullet === '*') {
+                // Asterisk bullet: style based on cursor proximity
+                if (cursorNearBullet) {
+                    // Show visible asterisk when cursor is right next to the bullet
+                    this.buffer.apply_tag_by_name('bullet-star-near', bulletStart, bulletEnd);
+                } else {
+                    // Show faint asterisk when cursor is away
+                    this.buffer.apply_tag_by_name('bullet-star', bulletStart, bulletEnd);
+                }
+            }
+            
+            // Apply margin styling to the entire line
             const lineStart = this.buffer.get_iter_at_offset(lineOffset);
             const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
             
@@ -1840,6 +1888,7 @@ class JotWindow extends Adw.ApplicationWindow {
         this._zoomTimeoutId = null; // Track zoom indicator timeout
         this._filenameUpdateTimeoutId = null; // Track filename update debouncing
         this._markdownRenderer = null; // Will be initialized after textview is created
+        this._lineMovePending = false; // Throttle line move operations
 
         this._buildUI();
         this._setupTheme();
@@ -1961,8 +2010,11 @@ class JotWindow extends Adw.ApplicationWindow {
                     print('Bullet line detected!');
                     const [, indent, bullet, content] = bulletMatch;
                     
-                    // If line is empty bullet, remove it and exit list
-                    if (!content.trim()) {
+                    // Check if this is a todo item (has [ ] or [X] or [x])
+                    const hasTodo = content.match(/^\[([ Xx])\]\s*/);
+                    
+                    // If line is empty bullet (or empty todo), remove it and exit list
+                    if (!content.trim() || (hasTodo && !content.slice(hasTodo[0].length).trim())) {
                         print('Empty bullet, removing');
                         const lineStart = buffer.get_iter_at_offset(lineStartOffset);
                         const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
@@ -1972,7 +2024,14 @@ class JotWindow extends Adw.ApplicationWindow {
                     
                     // Insert new bullet on next line
                     print('Adding new bullet');
-                    const newBullet = `\n${indent}${bullet} `;
+                    let newBullet;
+                    if (hasTodo) {
+                        // If current line has a todo checkbox, add [ ] to the new line
+                        newBullet = `\n${indent}${bullet} [ ] `;
+                    } else {
+                        // Normal bullet without todo checkbox
+                        newBullet = `\n${indent}${bullet} `;
+                    }
                     buffer.insert_at_cursor(newBullet, -1);
                     return true;
                 }
@@ -2012,6 +2071,63 @@ class JotWindow extends Adw.ApplicationWindow {
                     buffer.insert(insertIter, newLine, -1);
                     return true;
                 }
+            }
+            
+            // Handle Ctrl+X: Cut entire line if no text is selected
+            if (keyval === KEY_X && (state & CTRL_MASK)) {
+                print('Ctrl+X detected in textview handler');
+                const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+                
+                if (!hasSelection) {
+                    print('No selection - cutting entire line');
+                    // No text selected - cut the entire line
+                    const cursor = buffer.get_insert();
+                    const iter = buffer.get_iter_at_mark(cursor);
+                    
+                    // Get line start
+                    const lineStart = iter.copy();
+                    lineStart.set_line_offset(0);
+                    
+                    // Get line end (including the newline character if it exists)
+                    const lineEnd = iter.copy();
+                    if (!lineEnd.ends_line()) {
+                        lineEnd.forward_to_line_end();
+                    }
+                    // Include the newline character
+                    if (!lineEnd.is_end()) {
+                        lineEnd.forward_char();
+                    }
+                    
+                    // Get the clipboard
+                    const clipboard = this._textView.get_clipboard();
+                    
+                    // Copy line text to clipboard (GTK4 API)
+                    const lineText = buffer.get_text(lineStart, lineEnd, false);
+                    clipboard.set(lineText);
+                    
+                    // Delete the line
+                    buffer.delete(lineStart, lineEnd);
+                    
+                    print('Line cut to clipboard');
+                    return true;
+                }
+                print('Selection exists - using default cut');
+                // If text is already selected, let the default cut handler process it
+                return false;
+            }
+            
+            // Handle Ctrl+Up: Move line up
+            if (keyval === KEY_UP && (state & CTRL_MASK)) {
+                print('Ctrl+Up detected');
+                this._moveLineUp();
+                return true;
+            }
+            
+            // Handle Ctrl+Down: Move line down
+            if (keyval === KEY_DOWN && (state & CTRL_MASK)) {
+                print('Ctrl+Down detected');
+                this._moveLineDown();
+                return true;
             }
             
             return false;
@@ -2395,6 +2511,167 @@ class JotWindow extends Adw.ApplicationWindow {
                                GLib.build_filenamev([FileManager.getJotDirectory(), this._currentFilename]);
             this._pathLabel.set_label(actualPath);
             this._zoomTimeoutId = null;
+            return false;
+        });
+    }
+
+    _moveLineUp() {
+        // Throttle to prevent overwhelming the UI when holding down the key
+        if (this._lineMovePending) {
+            return;
+        }
+        this._lineMovePending = true;
+        
+        const buffer = this._textView.get_buffer();
+        const cursor = buffer.get_insert();
+        const iter = buffer.get_iter_at_mark(cursor);
+        const currentLineNum = iter.get_line();
+        
+        // Can't move the first line up
+        if (currentLineNum === 0) {
+            this._lineMovePending = false;
+            return;
+        }
+        
+        // Calculate cursor position within the line
+        const cursorOffset = iter.get_line_offset();
+        
+        // Get all text and split into lines
+        const [start, end] = buffer.get_bounds();
+        const allText = buffer.get_text(start, end, false);
+        const lines = allText.split('\n');
+        
+        const currentLineText = lines[currentLineNum];
+        const prevLineText = lines[currentLineNum - 1];
+        
+        // Calculate byte offsets for the two lines
+        let prevLineStart = 0;
+        for (let i = 0; i < currentLineNum - 1; i++) {
+            prevLineStart += lines[i].length + 1; // +1 for newline
+        }
+        const currentLineStart = prevLineStart + prevLineText.length + 1;
+        const currentLineEnd = currentLineStart + currentLineText.length;
+        
+        // Delete both lines and replace with swapped version
+        const deleteStart = buffer.get_iter_at_offset(prevLineStart);
+        const deleteEnd = buffer.get_iter_at_offset(currentLineEnd);
+        
+        buffer.begin_user_action();
+        buffer.delete(deleteStart, deleteEnd);
+        
+        const insertIter = buffer.get_iter_at_offset(prevLineStart);
+        buffer.insert(insertIter, `${currentLineText}\n${prevLineText}`, -1);
+        
+        // Move cursor to the new position (one line up, same offset)
+        const newCursorOffset = prevLineStart + Math.min(cursorOffset, currentLineText.length);
+        const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
+        buffer.place_cursor(newCursorIter);
+        
+        buffer.end_user_action();
+        
+        // Cancel any pending debounced renders and trigger immediate re-render
+        if (this._markdownRenderer) {
+            // Cancel pending timeouts
+            if (this._markdownRenderer._renderTimeoutId) {
+                GLib.source_remove(this._markdownRenderer._renderTimeoutId);
+                this._markdownRenderer._renderTimeoutId = null;
+            }
+            if (this._markdownRenderer._cursorTimeoutId) {
+                GLib.source_remove(this._markdownRenderer._cursorTimeoutId);
+                this._markdownRenderer._cursorTimeoutId = null;
+            }
+            // Reset the flag so cursor movements work again
+            this._markdownRenderer._textJustChanged = false;
+            // Do immediate render
+            this._markdownRenderer._updateSyntaxVisibility();
+        }
+        
+        this._textView.scroll_mark_onscreen(buffer.get_insert());
+        
+        // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
+            this._lineMovePending = false;
+            return false;
+        });
+    }
+
+    _moveLineDown() {
+        // Throttle to prevent overwhelming the UI when holding down the key
+        if (this._lineMovePending) {
+            return;
+        }
+        this._lineMovePending = true;
+        
+        const buffer = this._textView.get_buffer();
+        const cursor = buffer.get_insert();
+        const iter = buffer.get_iter_at_mark(cursor);
+        const currentLineNum = iter.get_line();
+        
+        // Calculate cursor position within the line
+        const cursorOffset = iter.get_line_offset();
+        
+        // Get all text and split into lines
+        const [start, end] = buffer.get_bounds();
+        const allText = buffer.get_text(start, end, false);
+        const lines = allText.split('\n');
+        
+        // Can't move the last line down
+        if (currentLineNum >= lines.length - 1) {
+            this._lineMovePending = false;
+            return;
+        }
+        
+        const currentLineText = lines[currentLineNum];
+        const nextLineText = lines[currentLineNum + 1];
+        
+        // Calculate byte offsets for the two lines
+        let currentLineStart = 0;
+        for (let i = 0; i < currentLineNum; i++) {
+            currentLineStart += lines[i].length + 1; // +1 for newline
+        }
+        const nextLineStart = currentLineStart + currentLineText.length + 1;
+        const nextLineEnd = nextLineStart + nextLineText.length;
+        
+        // Delete both lines and replace with swapped version
+        const deleteStart = buffer.get_iter_at_offset(currentLineStart);
+        const deleteEnd = buffer.get_iter_at_offset(nextLineEnd);
+        
+        buffer.begin_user_action();
+        buffer.delete(deleteStart, deleteEnd);
+        
+        const insertIter = buffer.get_iter_at_offset(currentLineStart);
+        buffer.insert(insertIter, `${nextLineText}\n${currentLineText}`, -1);
+        
+        // Move cursor to the new position (one line down, same offset)
+        // The current line is now after the next line, so add next line length + 1 for newline
+        const newCursorOffset = currentLineStart + nextLineText.length + 1 + Math.min(cursorOffset, currentLineText.length);
+        const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
+        buffer.place_cursor(newCursorIter);
+        
+        buffer.end_user_action();
+        
+        // Cancel any pending debounced renders and trigger immediate re-render
+        if (this._markdownRenderer) {
+            // Cancel pending timeouts
+            if (this._markdownRenderer._renderTimeoutId) {
+                GLib.source_remove(this._markdownRenderer._renderTimeoutId);
+                this._markdownRenderer._renderTimeoutId = null;
+            }
+            if (this._markdownRenderer._cursorTimeoutId) {
+                GLib.source_remove(this._markdownRenderer._cursorTimeoutId);
+                this._markdownRenderer._cursorTimeoutId = null;
+            }
+            // Reset the flag so cursor movements work again
+            this._markdownRenderer._textJustChanged = false;
+            // Do immediate render
+            this._markdownRenderer._updateSyntaxVisibility();
+        }
+        
+        this._textView.scroll_mark_onscreen(buffer.get_insert());
+        
+        // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
+            this._lineMovePending = false;
             return false;
         });
     }
