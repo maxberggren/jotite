@@ -460,7 +460,7 @@ class MarkdownRenderer {
         // Remove existing tags if they exist
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'bullet', 'dim', 'invisible',
+         'bullet', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
         
         // Add gradient background tags to removal list for all moods
@@ -703,6 +703,53 @@ class MarkdownRenderer {
         });
         tagTable.add(bulletTag);
         
+        // Todo checkboxes: [ ] and [X]
+        // Style to create a box appearance - when cursor is outside, only middle character visible
+        const todoUncheckedTag = new Gtk.TextTag({
+            name: 'todo-unchecked',
+            foreground: this.colors.cyan,
+            background: this._lightenColor(this.colors.background, 12),
+            scale: 0.7,  // Smaller font to create room at top and bottom
+            weight: 400,
+            family: 'monospace',  // Monospace for consistent box appearance
+            pixels_above_lines: 3,  // Add padding at top
+            pixels_below_lines: 0,  // Add padding at bottom
+            letter_spacing: 4000,  // Add horizontal spacing (in Pango units: 1024 = 1pt, so 4096 = 4pt)
+        });
+        tagTable.add(todoUncheckedTag);
+        
+        const todoCheckedTag = new Gtk.TextTag({
+            name: 'todo-checked',
+            foreground: this.colors.green,  // Keep foreground green for the X character
+            background: this.colors.green,  // Use green as background to create a filled box appearance
+            scale: 0.7,  // Smaller font to create room at top and bottom
+            weight: 700,  // Bold for checked items  
+            family: 'monospace',  // Monospace for consistent box appearance
+            pixels_above_lines: 3,  // Add padding at top
+            pixels_below_lines: 0,  // Add padding at bottom
+            letter_spacing: 4000,  // Add horizontal spacing (in Pango units: 1024 = 1pt, so 4096 = 4pt)
+        });
+        tagTable.add(todoCheckedTag);
+        
+        // Tags for when cursor is inside (no background)
+        const todoUncheckedInsideTag = new Gtk.TextTag({
+            name: 'todo-unchecked-inside',
+            foreground: this.colors.cyan,
+            scale: 1.2,
+            weight: 400,
+            family: 'monospace',
+        });
+        tagTable.add(todoUncheckedInsideTag);
+        
+        const todoCheckedInsideTag = new Gtk.TextTag({
+            name: 'todo-checked-inside',
+            foreground: this.colors.green,
+            scale: 1.2,
+            weight: 400,
+            family: 'monospace',
+        });
+        tagTable.add(todoCheckedInsideTag);
+        
         // Dim tag for markdown syntax (when cursor is inside)
         const dimTag = new Gtk.TextTag({
             name: 'dim',
@@ -835,7 +882,7 @@ class MarkdownRenderer {
             if (cursorOffset >= lineStart && cursorOffset <= lineEnd) {
                 const posInLine = cursorOffset - lineStart;
                 
-                // Check inline patterns: bold, italic, code, strikethrough, underline, links
+                // Check inline patterns: bold, italic, code, strikethrough, underline, links, todos
                 const patterns = [
                     { regex: /`([^`]+?)`/g, openLen: 1, closeLen: 1 },           // code
                     { regex: /(\*\*|__)(.+?)\1/g, openLen: 2, closeLen: 2 },    // bold
@@ -843,6 +890,7 @@ class MarkdownRenderer {
                     { regex: /_([^_]+?)_/g, openLen: 1, closeLen: 1 },          // italic _
                     { regex: /~~(.+?)~~/g, openLen: 2, closeLen: 2 },           // strikethrough
                     { regex: /\+\+(.+?)\+\+/g, openLen: 2, closeLen: 2 },       // underline
+                    { regex: /\[([ Xx])\]/g, openLen: 1, closeLen: 1 },         // todos
                     { regex: /\[(.+?)\]\((.+?)\)/g, openLen: 1, closeLen: 0 },  // links (special)
                 ];
                 
@@ -854,8 +902,8 @@ class MarkdownRenderer {
                         const matchStart = match.index;
                         const matchEnd = matchStart + match[0].length;
                         
-                        // Special handling for links
-                        if (pattern.regex.source.includes('\\[')) {
+                        // Special handling for links (they have 2 capture groups)
+                        if (pattern.regex.source.includes('\\[') && match[2] !== undefined) {
                             const textStart = matchStart + 1;
                             const textEnd = textStart + match[1].length;
                             const urlStart = textEnd + 2;
@@ -1017,6 +1065,9 @@ class MarkdownRenderer {
             this.buffer.apply_tag_by_name('bullet', bulletStart, bulletEnd);
         }
         
+        // Todo items: apply pattern for [ ] and [X] (but styling happens in cursor-aware version)
+        this._applyTodoPattern(line, lineOffset);
+        
         // Process patterns in order: bold first, then italic, then code, then strikethrough
         // Bold: **text** or __text__
         this._applyPattern(line, lineOffset, /\*\*(.+?)\*\*/g, 'bold');
@@ -1160,6 +1211,33 @@ class MarkdownRenderer {
         }
     }
     
+    _applyTodoPattern(line, lineOffset) {
+        // Match [ ] for unchecked or [X] for checked (also [x] lowercase)
+        const regex = /\[([ Xx])\]/g;
+        let match;
+        
+        while ((match = regex.exec(line)) !== null) {
+            const matchStart = lineOffset + match.index;
+            const matchEnd = matchStart + 3; // Length of [ ] or [X]
+            const checkChar = match[1];
+            const isChecked = checkChar === 'X' || checkChar === 'x';
+            
+            // Apply the appropriate tag
+            const start = this.buffer.get_iter_at_offset(matchStart);
+            const end = this.buffer.get_iter_at_offset(matchEnd);
+            this.buffer.apply_tag_by_name(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
+            
+            // Dim the brackets (will be overridden by invisible in cursor-aware version)
+            const bracket1 = this.buffer.get_iter_at_offset(matchStart);
+            const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
+            this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+            
+            const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
+            const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
+            this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+        }
+    }
+    
     _updateSyntaxVisibility() {
         if (this.updating) return;
         
@@ -1169,6 +1247,8 @@ class MarkdownRenderer {
         const cursor = this.buffer.get_insert();
         const cursorIter = this.buffer.get_iter_at_mark(cursor);
         const cursorOffset = cursorIter.get_offset();
+        
+        print(`_updateSyntaxVisibility called, cursor at offset: ${cursorOffset}`);
         
         // Get all text
         const [start, end] = this.buffer.get_bounds();
@@ -1301,6 +1381,9 @@ class MarkdownRenderer {
             const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
             this.buffer.apply_tag_by_name('bullet', bulletStart, bulletEnd);
         }
+        
+        // Todo items with cursor awareness
+        this._applyTodoPatternWithCursor(line, lineOffset, cursorOffset);
         
         // For inline patterns, check if cursor is inside each pattern
         // Process bold first, then italic, then code, then strikethrough
@@ -1499,6 +1582,60 @@ class MarkdownRenderer {
                 const paren3 = this.buffer.get_iter_at_offset(urlEnd);
                 const paren4 = this.buffer.get_iter_at_offset(urlEnd + 1);
                 this.buffer.apply_tag_by_name('invisible', paren3, paren4);
+            }
+        }
+    }
+    
+    _applyTodoPatternWithCursor(line, lineOffset, cursorOffset) {
+        // Match [ ] for unchecked or [X] for checked (also [x] lowercase)
+        const regex = /\[([ Xx])\]/g;
+        let match;
+        
+        while ((match = regex.exec(line)) !== null) {
+            const matchStart = lineOffset + match.index;
+            const matchEnd = matchStart + 3; // Length of [ ] or [X]
+            const checkChar = match[1];
+            const isChecked = checkChar === 'X' || checkChar === 'x';
+            
+            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
+            
+            if (cursorInside) {
+                print(`Todo cursor INSIDE at ${cursorOffset}, range: ${matchStart}-${matchEnd}`);
+            }
+            
+            // Apply the base tag for the entire checkbox
+            const start = this.buffer.get_iter_at_offset(matchStart);
+            const end = this.buffer.get_iter_at_offset(matchEnd);
+            
+            if (cursorInside) {
+                // When cursor is inside, use tags without background
+                this.buffer.apply_tag_by_name(isChecked ? 'todo-checked-inside' : 'todo-unchecked-inside', start, end);
+                
+                // Show the actual syntax when cursor is inside - dim everything (brackets and X)
+                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
+                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
+                this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+                
+                // Dim the middle character (X or space) as well
+                const middle1 = this.buffer.get_iter_at_offset(matchStart + 1);
+                const middle2 = this.buffer.get_iter_at_offset(matchStart + 2);
+                this.buffer.apply_tag_by_name('dim', middle1, middle2);
+                
+                const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
+                const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
+                this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+            } else {
+                // When cursor is outside, use tags with background
+                this.buffer.apply_tag_by_name(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
+                
+                // Hide the brackets to make it look cleaner
+                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
+                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
+                this.buffer.apply_tag_by_name('invisible', bracket1, bracket2);
+                
+                const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
+                const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
+                this.buffer.apply_tag_by_name('invisible', bracket3, bracket4);
             }
         }
     }
