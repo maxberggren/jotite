@@ -695,13 +695,29 @@ class MarkdownRenderer {
             }
         }
         
-        // Bullet points: - or * (fainter than text)
-        const bulletTag = new Gtk.TextTag({
-            name: 'bullet',
-            foreground: this.colors.cyan,
+        // Bullet character styling: - or * (fainter than text)
+        const bulletCharTag = new Gtk.TextTag({
+            name: 'bullet-char',
+            foreground: this.colors.foreground,
             scale: 0.9,
         });
-        tagTable.add(bulletTag);
+        tagTable.add(bulletCharTag);
+        
+        // Bullet line margins: persistent margins for main bullets
+        const bulletMarginTag = new Gtk.TextTag({
+            name: 'bullet-margin',
+            pixels_above_lines: 1,  // Margin above main bullet items
+            pixels_below_lines: 1,  // Margin below main bullet items
+        });
+        tagTable.add(bulletMarginTag);
+        
+        // Sub-bullet line margins: persistent margins for indented bullets
+        const subBulletMarginTag = new Gtk.TextTag({
+            name: 'sub-bullet-margin',
+            pixels_above_lines: 1,  // Margin above sub-bullet items
+            pixels_below_lines: 1,  // Margin below sub-bullet items
+        });
+        tagTable.add(subBulletMarginTag);
         
         // Todo checkboxes: [ ] and [X]
         // Style to create a box appearance - when cursor is outside, only middle character visible
@@ -966,8 +982,31 @@ class MarkdownRenderer {
         this.updating = true;
         const [start, end] = this.buffer.get_bounds();
         
-        // Remove all tags
-        this.buffer.remove_all_tags(start, end);
+        // Remove syntax tags but preserve margin tags
+        const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
+         'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
+         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char',
+         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
+        
+        // Add gradient background tags to removal list for all moods
+        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
+                          'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
+                          'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
+        for (const moodName of moodNames) {
+            for (let level = 1; level <= 6; level++) {
+                for (let i = 0; i < 30; i++) {
+                    tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
+                }
+            }
+        }
+        
+        // Remove only syntax tags, preserve margin tags (bullet, sub-bullet)
+        tagsToRemove.forEach(tagName => {
+            const tag = this.buffer.get_tag_table().lookup(tagName);
+            if (tag) {
+                this.buffer.remove_tag(tag, start, end);
+            }
+        });
         
         // Iterate using TextIter to get correct byte offsets (handles multi-byte chars like emojis)
         let iter = this.buffer.get_start_iter();
@@ -1062,7 +1101,21 @@ class MarkdownRenderer {
             const [, indent, bullet] = bulletMatch;
             const bulletStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
             const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
-            this.buffer.apply_tag_by_name('bullet', bulletStart, bulletEnd);
+            
+            // Apply bullet character styling
+            this.buffer.apply_tag_by_name('bullet-char', bulletStart, bulletEnd);
+            
+            // Apply margin styling to the entire line (only if not already applied)
+            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
+            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
+            
+            if (indent.length >= 2) {
+                // Apply sub-bullet margin for indented bullets (2+ spaces)
+                this.buffer.apply_tag_by_name('sub-bullet-margin', lineStart, lineEnd);
+            } else {
+                // Apply bullet margin for main bullets (0-1 spaces)
+                this.buffer.apply_tag_by_name('bullet-margin', lineStart, lineEnd);
+            }
         }
         
         // Todo items: apply pattern for [ ] and [X] (but styling happens in cursor-aware version)
@@ -1254,8 +1307,31 @@ class MarkdownRenderer {
         const [start, end] = this.buffer.get_bounds();
         const text = this.buffer.get_text(start, end, false);
         
-        // Remove all tags first
-        this.buffer.remove_all_tags(start, end);
+        // Remove syntax tags but preserve margin tags
+        const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
+         'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
+         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char',
+         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
+        
+        // Add gradient background tags to removal list for all moods
+        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
+                          'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
+                          'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
+        for (const moodName of moodNames) {
+            for (let level = 1; level <= 6; level++) {
+                for (let i = 0; i < 30; i++) {
+                    tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
+                }
+            }
+        }
+        
+        // Remove only syntax tags, preserve margin tags (bullet, sub-bullet)
+        tagsToRemove.forEach(tagName => {
+            const tag = this.buffer.get_tag_table().lookup(tagName);
+            if (tag) {
+                this.buffer.remove_tag(tag, start, end);
+            }
+        });
         
         // Find all markdown patterns and apply them
         // Show syntax markers only when cursor is inside the pattern
@@ -1379,7 +1455,21 @@ class MarkdownRenderer {
             const [, indent, bullet] = bulletMatch;
             const bulletStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
             const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
-            this.buffer.apply_tag_by_name('bullet', bulletStart, bulletEnd);
+            
+            // Apply bullet character styling
+            this.buffer.apply_tag_by_name('bullet-char', bulletStart, bulletEnd);
+            
+            // Apply margin styling to the entire line (only if not already applied)
+            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
+            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
+            
+            if (indent.length >= 2) {
+                // Apply sub-bullet margin for indented bullets (2+ spaces)
+                this.buffer.apply_tag_by_name('sub-bullet-margin', lineStart, lineEnd);
+            } else {
+                // Apply bullet margin for main bullets (0-1 spaces)
+                this.buffer.apply_tag_by_name('bullet-margin', lineStart, lineEnd);
+            }
         }
         
         // Todo items with cursor awareness
