@@ -21,8 +21,6 @@ https://github.com/user-attachments/assets/e132e309-d115-4bd1-a965-b219b8458457
 ```bash
 yay -S jot-git
 ```
-```
-```
 
 ## Development
 
@@ -32,7 +30,7 @@ Make sure you have GJS and GTK4 installed:
 
 ```bash
 # Arch Linux
-sudo pacman -S gjs gtk4 libadwaita
+sudo pacman -S gjs gtk4 libadwaita fontconfig
 ```
 
 ### Setup
@@ -48,12 +46,26 @@ sudo pacman -S gjs gtk4 libadwaita
    chmod +x jot.js
    ```
 
-3. (Optional) Create a symlink for easy access:
+3. **Font Installation** (automatic):
+   
+   Jot uses the **pxlxxl** pixel font for headers. The font will be automatically installed to `~/.local/share/fonts/jot/` when you first run the application.
+   
+   Alternatively, install manually:
+   ```bash
+   ./install-font.sh
+   ```
+   
+   Verify installation:
+   ```bash
+   fc-list | grep pxlxxl
+   ```
+
+4. (Optional) Create a symlink for easy access:
    ```bash
    sudo ln -s $(pwd)/jot.js /usr/local/bin/jot
    ```
 
-4. (Optional) Install desktop entry:
+5. (Optional) Install desktop entry:
    ```bash
    mkdir -p ~/.local/share/applications
    cp jot.desktop ~/.local/share/applications/
@@ -156,3 +168,4 @@ Built with:
 - [GJS](https://gjs.guide/) - GNOME JavaScript bindings
 - [GTK4](https://www.gtk.org/) - The GTK toolkit
 - [Libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/) - GNOME design patterns
+- [pxlxxl font](https://www.1001fonts.com/pxlxxl-font.html) - Pixel font for headers (free for personal use)

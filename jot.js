@@ -1833,6 +1833,60 @@ class JotApplication extends Adw.Application {
             flags: Gio.ApplicationFlags.HANDLES_OPEN,
         });
         this._fileToOpen = null;
+        
+        // Ensure font is installed
+        this._ensureFontInstalled();
+    }
+    
+    _ensureFontInstalled() {
+        try {
+            // Check if font is already installed by checking fontconfig
+            const checkCmd = ['fc-list', ':', 'family', 'file'];
+            const [, checkOutput] = GLib.spawn_command_line_sync(checkCmd.join(' '));
+            const fontList = new TextDecoder().decode(checkOutput);
+            
+            if (fontList.includes('pxlxxl')) {
+                print('Font pxlxxl already installed');
+                return;
+            }
+            
+            print('Font pxlxxl not found, installing...');
+            
+            // Get the directory where jot.js is located
+            const scriptPath = GLib.path_get_dirname(imports.system.programPath);
+            const fontSourcePath = GLib.build_filenamev([scriptPath, 'pxlxxl.ttf']);
+            
+            // Check if font file exists in script directory
+            const fontFile = Gio.File.new_for_path(fontSourcePath);
+            if (!fontFile.query_exists(null)) {
+                print(`Warning: Font file not found at ${fontSourcePath}`);
+                print('Run ./install-font.sh to install the font manually');
+                return;
+            }
+            
+            // Install to user fonts directory
+            const fontDir = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'share', 'fonts', 'jot']);
+            const fontDirFile = Gio.File.new_for_path(fontDir);
+            
+            // Create directory if it doesn't exist
+            if (!fontDirFile.query_exists(null)) {
+                fontDirFile.make_directory_with_parents(null);
+            }
+            
+            // Copy font file
+            const fontDestPath = GLib.build_filenamev([fontDir, 'pxlxxl.ttf']);
+            const fontDestFile = Gio.File.new_for_path(fontDestPath);
+            fontFile.copy(fontDestFile, Gio.FileCopyFlags.OVERWRITE, null, null);
+            
+            // Update font cache
+            const updateCmd = ['fc-cache', '-f', fontDir];
+            GLib.spawn_command_line_sync(updateCmd.join(' '));
+            
+            print(`✓ Font installed successfully to ${fontDir}`);
+        } catch (e) {
+            print(`Warning: Could not auto-install font: ${e.message}`);
+            print('Run ./install-font.sh to install the font manually');
+        }
     }
 
     vfunc_activate() {
