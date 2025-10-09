@@ -29,68 +29,6 @@ const FILE_PATTERNS = ['*.md', '*.txt'];
 const FILE_FILTER_NAME = 'Text files (*.md, *.txt)';
 
 // ============================================================================
-// Performance Logger
-// ============================================================================
-
-class PerformanceLogger {
-    constructor() {
-        this.logPath = GLib.build_filenamev([GLib.get_home_dir(), 'jot-performance.log']);
-        this.timers = new Map();
-        this.counters = new Map();
-        this._writeLog(`\n${'='.repeat(80)}\nNew session started: ${new Date().toISOString()}\n${'='.repeat(80)}\n`);
-    }
-    
-    _writeLog(message) {
-        try {
-            const file = Gio.File.new_for_path(this.logPath);
-            const outputStream = file.append_to(Gio.FileCreateFlags.NONE, null);
-            outputStream.write_all(`${message}\n`, null);
-            outputStream.close(null);
-        } catch (e) {
-            print(`Failed to write perf log: ${e.message}`);
-        }
-    }
-    
-    startTimer(name) {
-        this.timers.set(name, GLib.get_monotonic_time());
-    }
-    
-    endTimer(name, extraInfo = '') {
-        if (this.timers.has(name)) {
-            const start = this.timers.get(name);
-            const end = GLib.get_monotonic_time();
-            const durationMs = (end - start) / 1000;
-            const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
-            this._writeLog(`[${timestamp}] ${name}: ${durationMs.toFixed(2)}ms ${extraInfo}`);
-            this.timers.delete(name);
-            return durationMs;
-        }
-        return 0;
-    }
-    
-    logEvent(name, info = '') {
-        const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
-        this._writeLog(`[${timestamp}] EVENT: ${name} ${info}`);
-    }
-    
-    incrementCounter(name) {
-        const current = this.counters.get(name) || 0;
-        this.counters.set(name, current + 1);
-    }
-    
-    logCounters() {
-        const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
-        this._writeLog(`[${timestamp}] COUNTERS:`);
-        for (const [name, count] of this.counters.entries()) {
-            this._writeLog(`  ${name}: ${count}`);
-        }
-        this.counters.clear();
-    }
-}
-
-const perfLogger = new PerformanceLogger();
-
-// ============================================================================
 // Theme Manager
 // ============================================================================
 
@@ -894,7 +832,6 @@ class MarkdownRenderer {
         // Update on text changes with debouncing (50ms delay)
         this.buffer.connect('changed', () => {
             if (!this.updating) {
-                perfLogger.incrementCounter('buffer-changed');
                 // Mark that text just changed to prevent cursor flicker
                 this._textJustChanged = true;
                 
@@ -904,9 +841,7 @@ class MarkdownRenderer {
                 }
                 // Schedule new render (cursor-aware so syntax shows where we're typing)
                 this._renderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
-                    perfLogger.startTimer('render-after-change');
                     this._updateSyntaxVisibility();
-                    perfLogger.endTimer('render-after-change');
                     this._renderTimeoutId = null;
                     // Reset the flag after a short delay to allow cursor updates again
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
@@ -921,17 +856,14 @@ class MarkdownRenderer {
         // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
         this.buffer.connect('notify::cursor-position', () => {
             if (!this.updating && !this._textJustChanged) {
-                perfLogger.incrementCounter('cursor-moved');
                 // Cancel previous timeout if exists
                 if (this._cursorTimeoutId) {
                     GLib.source_remove(this._cursorTimeoutId);
                 }
                 // Schedule new cursor update
                 this._cursorTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
-                    perfLogger.startTimer('cursor-update');
                     this._adjustCursorPosition();
                     this._updateSyntaxVisibility();
-                    perfLogger.endTimer('cursor-update');
                     this._cursorTimeoutId = null;
                     return false;
                 });
@@ -1402,46 +1334,33 @@ class MarkdownRenderer {
     _updateSyntaxVisibility() {
         if (this.updating) return;
         
-        perfLogger.startTimer('_updateSyntaxVisibility');
         this.updating = true;
         
         // Get cursor position
-        perfLogger.startTimer('get-cursor-position');
         const cursor = this.buffer.get_insert();
         const cursorIter = this.buffer.get_iter_at_mark(cursor);
         const cursorOffset = cursorIter.get_offset();
-        perfLogger.endTimer('get-cursor-position');
         
         print(`_updateSyntaxVisibility called, cursor at offset: ${cursorOffset}`);
         
         // Get all text
-        perfLogger.startTimer('get-buffer-text');
         const [start, end] = this.buffer.get_bounds();
         const text = this.buffer.get_text(start, end, false);
-        const textLength = text.length;
-        const lineCount = text.split('\n').length;
-        perfLogger.endTimer('get-buffer-text', `(${textLength} chars, ${lineCount} lines)`);
         
         // Remove only tags that were actually applied (Optimization #1)
-        perfLogger.startTimer('remove-tags');
         this._appliedTags.forEach(tagName => {
             const tag = this.buffer.get_tag_table().lookup(tagName);
             if (tag) {
                 this.buffer.remove_tag(tag, start, end);
             }
         });
-        const removedCount = this._appliedTags.size;
         this._appliedTags.clear(); // Clear for next render
-        perfLogger.endTimer('remove-tags', `(${removedCount} tags)`);
         
         // Find all markdown patterns and apply them
         // Show syntax markers only when cursor is inside the pattern
-        perfLogger.startTimer('apply-markdown');
         this._applyMarkdownWithCursorContext(text, cursorOffset);
-        perfLogger.endTimer('apply-markdown');
         
         this.updating = false;
-        perfLogger.endTimer('_updateSyntaxVisibility');
     }
     
     _applyMarkdownWithCursorContext(text, cursorOffset) {
@@ -1976,14 +1895,6 @@ class JotWindow extends Adw.ApplicationWindow {
         buffer.place_cursor(iter);
         
         this._textView.grab_focus();
-        
-        // Setup periodic performance counter logging (every 5 seconds)
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 5000, () => {
-            perfLogger.logCounters();
-            return true; // Continue repeating
-        });
-        
-        perfLogger.logEvent('APP', 'Window initialized');
     }
 
     _buildUI() {
@@ -2358,31 +2269,20 @@ class JotWindow extends Adw.ApplicationWindow {
     _setupKeyboardShortcuts() {
         const keyController = new Gtk.EventControllerKey();
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
-            perfLogger.incrementCounter('key-pressed');
-            // Debug: log Ctrl key presses
-            if (state & CTRL_MASK) {
-                perfLogger.incrementCounter('ctrl-key-pressed');
-                print(`Ctrl key pressed: keyval=${keyval}, keycode=${keycode}`);
-            }
-            
             if (keyval === KEY_ESCAPE) {
-                perfLogger.logEvent('KEY', 'ESC pressed');
                 this.close();
                 return true;
             }
             if ((keyval === KEY_ENTER || keyval === KEY_S) && (state & CTRL_MASK)) {
-                perfLogger.logEvent('KEY', 'Ctrl+Enter/S (save)');
                 this._saveNote();
                 return true;
             }
             if (keyval === KEY_N && (state & CTRL_MASK)) {
-                perfLogger.logEvent('KEY', 'Ctrl+N (new file)');
                 this._newFile();
                 return true;
             }
             // Zoom in: Ctrl + or Ctrl = (multiple keycodes for compatibility)
             if ((keyval === KEY_PLUS || keyval === 43 || keyval === 61 || keyval === 65451 || keyval === 65455) && (state & CTRL_MASK)) {
-                perfLogger.logEvent('KEY', 'Ctrl++ (zoom in)');
                 this._zoomIn();
                 return true;
             }
@@ -2560,42 +2460,33 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _zoomIn() {
-        perfLogger.startTimer('zoom-in');
         this._zoomLevel = Math.min(this._zoomLevel + 10, 300); // Max 300%
-        print(`Zoom in called, new level: ${this._zoomLevel}%`);
         this._applyCSS();
         // Trigger markdown re-render to update styling after zoom
         if (this._markdownRenderer) {
             this._markdownRenderer._updateSyntaxVisibility();
         }
         this._showZoomLevel();
-        perfLogger.endTimer('zoom-in', `(level: ${this._zoomLevel}%)`);
     }
 
     _zoomOut() {
-        perfLogger.startTimer('zoom-out');
         this._zoomLevel = Math.max(this._zoomLevel - 10, 50); // Min 50%
-        print(`Zoom out called, new level: ${this._zoomLevel}%`);
         this._applyCSS();
         // Trigger markdown re-render to update styling after zoom
         if (this._markdownRenderer) {
             this._markdownRenderer._updateSyntaxVisibility();
         }
         this._showZoomLevel();
-        perfLogger.endTimer('zoom-out', `(level: ${this._zoomLevel}%)`);
     }
 
     _zoomReset() {
-        perfLogger.startTimer('zoom-reset');
         this._zoomLevel = 100;
-        print(`Zoom reset called, level: ${this._zoomLevel}%`);
         this._applyCSS();
         // Trigger markdown re-render to update styling after zoom
         if (this._markdownRenderer) {
             this._markdownRenderer._updateSyntaxVisibility();
         }
         this._showZoomLevel();
-        perfLogger.endTimer('zoom-reset');
     }
 
     _showZoomLevel() {
