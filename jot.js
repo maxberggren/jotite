@@ -29,6 +29,68 @@ const FILE_PATTERNS = ['*.md', '*.txt'];
 const FILE_FILTER_NAME = 'Text files (*.md, *.txt)';
 
 // ============================================================================
+// Performance Logger
+// ============================================================================
+
+class PerformanceLogger {
+    constructor() {
+        this.logPath = GLib.build_filenamev([GLib.get_home_dir(), 'jot-performance.log']);
+        this.timers = new Map();
+        this.counters = new Map();
+        this._writeLog(`\n${'='.repeat(80)}\nNew session started: ${new Date().toISOString()}\n${'='.repeat(80)}\n`);
+    }
+    
+    _writeLog(message) {
+        try {
+            const file = Gio.File.new_for_path(this.logPath);
+            const outputStream = file.append_to(Gio.FileCreateFlags.NONE, null);
+            outputStream.write_all(`${message}\n`, null);
+            outputStream.close(null);
+        } catch (e) {
+            print(`Failed to write perf log: ${e.message}`);
+        }
+    }
+    
+    startTimer(name) {
+        this.timers.set(name, GLib.get_monotonic_time());
+    }
+    
+    endTimer(name, extraInfo = '') {
+        if (this.timers.has(name)) {
+            const start = this.timers.get(name);
+            const end = GLib.get_monotonic_time();
+            const durationMs = (end - start) / 1000;
+            const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
+            this._writeLog(`[${timestamp}] ${name}: ${durationMs.toFixed(2)}ms ${extraInfo}`);
+            this.timers.delete(name);
+            return durationMs;
+        }
+        return 0;
+    }
+    
+    logEvent(name, info = '') {
+        const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
+        this._writeLog(`[${timestamp}] EVENT: ${name} ${info}`);
+    }
+    
+    incrementCounter(name) {
+        const current = this.counters.get(name) || 0;
+        this.counters.set(name, current + 1);
+    }
+    
+    logCounters() {
+        const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
+        this._writeLog(`[${timestamp}] COUNTERS:`);
+        for (const [name, count] of this.counters.entries()) {
+            this._writeLog(`  ${name}: ${count}`);
+        }
+        this.counters.clear();
+    }
+}
+
+const perfLogger = new PerformanceLogger();
+
+// ============================================================================
 // Theme Manager
 // ============================================================================
 
@@ -433,6 +495,7 @@ class MarkdownRenderer {
         this._renderTimeoutId = null;
         this._cursorTimeoutId = null;
         this._textJustChanged = false; // Track if text was recently changed
+        this._appliedTags = new Set(); // Track which tags we actually applied (Optimization #1)
         
         this._initTags();
         this._setupSignals();
@@ -627,7 +690,8 @@ class MarkdownRenderer {
         };
         
         // Generate gradient steps for each mood that loops smoothly
-        const steps = 30;
+        // Optimization #2: Reduced to 8 steps for blocky aesthetic
+        const steps = 20;
         for (const [moodName, moodData] of Object.entries(moods)) {
             const gradientColors = [];
             const palette = moodData.colors.map(parseColor);
@@ -830,6 +894,7 @@ class MarkdownRenderer {
         // Update on text changes with debouncing (50ms delay)
         this.buffer.connect('changed', () => {
             if (!this.updating) {
+                perfLogger.incrementCounter('buffer-changed');
                 // Mark that text just changed to prevent cursor flicker
                 this._textJustChanged = true;
                 
@@ -839,7 +904,9 @@ class MarkdownRenderer {
                 }
                 // Schedule new render (cursor-aware so syntax shows where we're typing)
                 this._renderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
+                    perfLogger.startTimer('render-after-change');
                     this._updateSyntaxVisibility();
+                    perfLogger.endTimer('render-after-change');
                     this._renderTimeoutId = null;
                     // Reset the flag after a short delay to allow cursor updates again
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
@@ -854,14 +921,17 @@ class MarkdownRenderer {
         // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
         this.buffer.connect('notify::cursor-position', () => {
             if (!this.updating && !this._textJustChanged) {
+                perfLogger.incrementCounter('cursor-moved');
                 // Cancel previous timeout if exists
                 if (this._cursorTimeoutId) {
                     GLib.source_remove(this._cursorTimeoutId);
                 }
                 // Schedule new cursor update
                 this._cursorTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
+                    perfLogger.startTimer('cursor-update');
                     this._adjustCursorPosition();
                     this._updateSyntaxVisibility();
+                    perfLogger.endTimer('cursor-update');
                     this._cursorTimeoutId = null;
                     return false;
                 });
@@ -873,6 +943,12 @@ class MarkdownRenderer {
         this.colors = colors;
         this._initTags();
         this._applyMarkdown();
+    }
+    
+    // Helper to apply tag and track it (Optimization #1)
+    _applyTag(tagName, start, end) {
+        this.buffer.apply_tag_by_name(tagName, start, end);
+        this._appliedTags.add(tagName);
     }
     
     _adjustCursorPosition() {
@@ -1068,7 +1144,7 @@ class MarkdownRenderer {
                 } else {
                     // Ending a code block
                     const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-                    this.buffer.apply_tag_by_name('code-block', blockStart, lineEnd);
+                    this._applyTag('code-block', blockStart, lineEnd);
                     
                     // Dim the backticks on start line
                     const codeBlockStartIter = this.buffer.get_iter_at_offset(codeBlockStart);
@@ -1076,10 +1152,10 @@ class MarkdownRenderer {
                     if (!codeBlockStartEnd.ends_line()) {
                         codeBlockStartEnd.forward_to_line_end();
                     }
-                    this.buffer.apply_tag_by_name('dim', codeBlockStartIter, codeBlockStartEnd);
+                    this._applyTag('dim', codeBlockStartIter, codeBlockStartEnd);
                     
                     // Dim the backticks on end line
-                    this.buffer.apply_tag_by_name('dim', lineStart, lineEnd);
+                    this._applyTag('dim', lineStart, lineEnd);
                     
                     inCodeBlock = false;
                     codeBlockStart = -1;
@@ -1108,7 +1184,7 @@ class MarkdownRenderer {
             
             // Hide the hashes by default (will be shown when cursor is on line)
             const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space
-            this.buffer.apply_tag_by_name('invisible', start, hashEnd);
+            this._applyTag('invisible', start, hashEnd);
             
             // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
             const moodIndex = (actualLevel - 1) % this.moodNames.length;
@@ -1122,7 +1198,7 @@ class MarkdownRenderer {
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
                 // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                this.buffer.apply_tag_by_name(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
             }
             // Don't return - continue to apply inline formatting to header content
         }
@@ -1135,7 +1211,7 @@ class MarkdownRenderer {
             const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
             
             // Apply bullet character styling
-            this.buffer.apply_tag_by_name('bullet-char', bulletStart, bulletEnd);
+            this._applyTag('bullet-char', bulletStart, bulletEnd);
             
             // Apply margin styling to the entire line (only if not already applied)
             const lineStart = this.buffer.get_iter_at_offset(lineOffset);
@@ -1143,10 +1219,10 @@ class MarkdownRenderer {
             
             if (indent.length >= 2) {
                 // Apply sub-bullet margin for indented bullets (2+ spaces)
-                this.buffer.apply_tag_by_name('sub-bullet-margin', lineStart, lineEnd);
+                this._applyTag('sub-bullet-margin', lineStart, lineEnd);
             } else {
                 // Apply bullet margin for main bullets (0-1 spaces)
-                this.buffer.apply_tag_by_name('bullet-margin', lineStart, lineEnd);
+                this._applyTag('bullet-margin', lineStart, lineEnd);
             }
         }
         
@@ -1189,15 +1265,15 @@ class MarkdownRenderer {
                         
                         const start = this.buffer.get_iter_at_offset(matchStart);
                         const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this.buffer.apply_tag_by_name('italic', start, end);
+                        this._applyTag('italic', start, end);
                         
                         const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                         const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                        this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                        this._applyTag('invisible', syntaxStart1, syntaxEnd1);
                         
                         const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                         const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                        this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                        this._applyTag('invisible', syntaxStart2, syntaxEnd2);
                         break;
                     }
                 }
@@ -1213,15 +1289,15 @@ class MarkdownRenderer {
                         
                         const start = this.buffer.get_iter_at_offset(matchStart);
                         const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this.buffer.apply_tag_by_name('italic', start, end);
+                        this._applyTag('italic', start, end);
                         
                         const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                         const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                        this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                        this._applyTag('invisible', syntaxStart1, syntaxEnd1);
                         
                         const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                         const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                        this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                        this._applyTag('invisible', syntaxStart2, syntaxEnd2);
                         break;
                     }
                 }
@@ -1242,16 +1318,16 @@ class MarkdownRenderer {
             // Apply tag to entire match
             const start = this.buffer.get_iter_at_offset(lineOffset + matchStart);
             const end = this.buffer.get_iter_at_offset(lineOffset + matchEnd);
-            this.buffer.apply_tag_by_name(tagName, start, end);
+            this._applyTag(tagName, start, end);
             
             // Dim the syntax markers
             const syntaxStart1 = this.buffer.get_iter_at_offset(lineOffset + matchStart);
             const syntaxEnd1 = this.buffer.get_iter_at_offset(lineOffset + contentStart);
-            this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+            this._applyTag('dim', syntaxStart1, syntaxEnd1);
             
             const syntaxStart2 = this.buffer.get_iter_at_offset(lineOffset + contentEnd);
             const syntaxEnd2 = this.buffer.get_iter_at_offset(lineOffset + matchEnd);
-            this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+            this._applyTag('dim', syntaxStart2, syntaxEnd2);
         }
     }
     
@@ -1270,29 +1346,29 @@ class MarkdownRenderer {
             // Apply link tag to text
             const linkStart = this.buffer.get_iter_at_offset(lineOffset + textStart);
             const linkEnd = this.buffer.get_iter_at_offset(lineOffset + textEnd);
-            this.buffer.apply_tag_by_name('link', linkStart, linkEnd);
+            this._applyTag('link', linkStart, linkEnd);
             
             // Apply link-url tag to URL
             const urlStartIter = this.buffer.get_iter_at_offset(lineOffset + urlStart);
             const urlEndIter = this.buffer.get_iter_at_offset(lineOffset + urlEnd);
-            this.buffer.apply_tag_by_name('link-url', urlStartIter, urlEndIter);
+            this._applyTag('link-url', urlStartIter, urlEndIter);
             
             // Dim the brackets and parentheses
             const bracket1 = this.buffer.get_iter_at_offset(lineOffset + matchStart);
             const bracket2 = this.buffer.get_iter_at_offset(lineOffset + matchStart + 1);
-            this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+            this._applyTag('dim', bracket1, bracket2);
             
             const bracket3 = this.buffer.get_iter_at_offset(lineOffset + textEnd);
             const bracket4 = this.buffer.get_iter_at_offset(lineOffset + textEnd + 1);
-            this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+            this._applyTag('dim', bracket3, bracket4);
             
             const paren1 = this.buffer.get_iter_at_offset(lineOffset + urlStart - 1);
             const paren2 = this.buffer.get_iter_at_offset(lineOffset + urlStart);
-            this.buffer.apply_tag_by_name('dim', paren1, paren2);
+            this._applyTag('dim', paren1, paren2);
             
             const paren3 = this.buffer.get_iter_at_offset(lineOffset + urlEnd);
             const paren4 = this.buffer.get_iter_at_offset(lineOffset + urlEnd + 1);
-            this.buffer.apply_tag_by_name('dim', paren3, paren4);
+            this._applyTag('dim', paren3, paren4);
         }
     }
     
@@ -1310,66 +1386,62 @@ class MarkdownRenderer {
             // Apply the appropriate tag
             const start = this.buffer.get_iter_at_offset(matchStart);
             const end = this.buffer.get_iter_at_offset(matchEnd);
-            this.buffer.apply_tag_by_name(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
+            this._applyTag(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
             
             // Dim the brackets (will be overridden by invisible in cursor-aware version)
             const bracket1 = this.buffer.get_iter_at_offset(matchStart);
             const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-            this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+            this._applyTag('dim', bracket1, bracket2);
             
             const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
             const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
-            this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+            this._applyTag('dim', bracket3, bracket4);
         }
     }
     
     _updateSyntaxVisibility() {
         if (this.updating) return;
         
+        perfLogger.startTimer('_updateSyntaxVisibility');
         this.updating = true;
         
         // Get cursor position
+        perfLogger.startTimer('get-cursor-position');
         const cursor = this.buffer.get_insert();
         const cursorIter = this.buffer.get_iter_at_mark(cursor);
         const cursorOffset = cursorIter.get_offset();
+        perfLogger.endTimer('get-cursor-position');
         
         print(`_updateSyntaxVisibility called, cursor at offset: ${cursorOffset}`);
         
         // Get all text
+        perfLogger.startTimer('get-buffer-text');
         const [start, end] = this.buffer.get_bounds();
         const text = this.buffer.get_text(start, end, false);
+        const textLength = text.length;
+        const lineCount = text.split('\n').length;
+        perfLogger.endTimer('get-buffer-text', `(${textLength} chars, ${lineCount} lines)`);
         
-        // Remove syntax tags but preserve margin tags
-        const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
-         'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
-         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
-        
-        // Add gradient background tags to removal list for all moods
-        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
-                          'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
-                          'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
-        for (const moodName of moodNames) {
-            for (let level = 1; level <= 6; level++) {
-                for (let i = 0; i < 30; i++) {
-                    tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
-                }
-            }
-        }
-        
-        // Remove only syntax tags, preserve margin tags (bullet, sub-bullet)
-        tagsToRemove.forEach(tagName => {
+        // Remove only tags that were actually applied (Optimization #1)
+        perfLogger.startTimer('remove-tags');
+        this._appliedTags.forEach(tagName => {
             const tag = this.buffer.get_tag_table().lookup(tagName);
             if (tag) {
                 this.buffer.remove_tag(tag, start, end);
             }
         });
+        const removedCount = this._appliedTags.size;
+        this._appliedTags.clear(); // Clear for next render
+        perfLogger.endTimer('remove-tags', `(${removedCount} tags)`);
         
         // Find all markdown patterns and apply them
         // Show syntax markers only when cursor is inside the pattern
+        perfLogger.startTimer('apply-markdown');
         this._applyMarkdownWithCursorContext(text, cursorOffset);
+        perfLogger.endTimer('apply-markdown');
         
         this.updating = false;
+        perfLogger.endTimer('_updateSyntaxVisibility');
     }
     
     _applyMarkdownWithCursorContext(text, cursorOffset) {
@@ -1409,7 +1481,7 @@ class MarkdownRenderer {
                     const cursorInBlock = cursorOffset >= codeBlockStart && cursorOffset <= lineEndOffset;
                     
                     const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-                    this.buffer.apply_tag_by_name('code-block', blockStart, lineEnd);
+                    this._applyTag('code-block', blockStart, lineEnd);
                     
                     // Dim or hide the backticks based on cursor position
                     if (cursorInBlock) {
@@ -1418,16 +1490,16 @@ class MarkdownRenderer {
                         if (!codeBlockStartEnd.ends_line()) {
                             codeBlockStartEnd.forward_to_line_end();
                         }
-                        this.buffer.apply_tag_by_name('dim', codeBlockStartIter, codeBlockStartEnd);
-                        this.buffer.apply_tag_by_name('dim', lineStart, lineEnd);
+                        this._applyTag('dim', codeBlockStartIter, codeBlockStartEnd);
+                        this._applyTag('dim', lineStart, lineEnd);
                     } else {
                         // Hide backticks when cursor is outside
                         const codeBlockStartEnd = codeBlockStartIter.copy();
                         if (!codeBlockStartEnd.ends_line()) {
                             codeBlockStartEnd.forward_to_line_end();
                         }
-                        this.buffer.apply_tag_by_name('invisible', codeBlockStartIter, codeBlockStartEnd);
-                        this.buffer.apply_tag_by_name('invisible', lineStart, lineEnd);
+                        this._applyTag('invisible', codeBlockStartIter, codeBlockStartEnd);
+                        this._applyTag('invisible', lineStart, lineEnd);
                     }
                     
                     inCodeBlock = false;
@@ -1458,10 +1530,10 @@ class MarkdownRenderer {
             const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space after #
             if (cursorOnLine) {
                 // Cursor is on this line - show hashes with level-specific dim tag
-                this.buffer.apply_tag_by_name(`dim-h${styleLevel}`, start, hashEnd);
+                this._applyTag(`dim-h${styleLevel}`, start, hashEnd);
             } else {
                 // Cursor is on a different line - hide the hashes
-                this.buffer.apply_tag_by_name('invisible', start, hashEnd);
+                this._applyTag('invisible', start, hashEnd);
             }
             
             // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
@@ -1476,7 +1548,7 @@ class MarkdownRenderer {
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
                 // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                this.buffer.apply_tag_by_name(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
             }
             // Don't return - continue to apply inline formatting to header content
         }
@@ -1495,15 +1567,15 @@ class MarkdownRenderer {
             // Apply styling ONLY - never modify buffer content
             if (bullet === '-') {
                 // Dash bullet: always show with reduced opacity
-                this.buffer.apply_tag_by_name('bullet-dash', bulletStart, bulletEnd);
+                this._applyTag('bullet-dash', bulletStart, bulletEnd);
             } else if (bullet === '*') {
                 // Asterisk bullet: style based on cursor proximity
                 if (cursorNearBullet) {
                     // Show visible asterisk when cursor is right next to the bullet
-                    this.buffer.apply_tag_by_name('bullet-star-near', bulletStart, bulletEnd);
+                    this._applyTag('bullet-star-near', bulletStart, bulletEnd);
                 } else {
                     // Show faint asterisk when cursor is away
-                    this.buffer.apply_tag_by_name('bullet-star', bulletStart, bulletEnd);
+                    this._applyTag('bullet-star', bulletStart, bulletEnd);
                 }
             }
             
@@ -1513,10 +1585,10 @@ class MarkdownRenderer {
             
             if (indent.length >= 2) {
                 // Apply sub-bullet margin for indented bullets (2+ spaces)
-                this.buffer.apply_tag_by_name('sub-bullet-margin', lineStart, lineEnd);
+                this._applyTag('sub-bullet-margin', lineStart, lineEnd);
             } else {
                 // Apply bullet margin for main bullets (0-1 spaces)
-                this.buffer.apply_tag_by_name('bullet-margin', lineStart, lineEnd);
+                this._applyTag('bullet-margin', lineStart, lineEnd);
             }
         }
         
@@ -1553,24 +1625,24 @@ class MarkdownRenderer {
                         
                         const start = this.buffer.get_iter_at_offset(matchStart);
                         const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this.buffer.apply_tag_by_name('italic', start, end);
+                        this._applyTag('italic', start, end);
                         
                         if (cursorInside) {
                             const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                             const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+                            this._applyTag('dim', syntaxStart1, syntaxEnd1);
                             
                             const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                             const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+                            this._applyTag('dim', syntaxStart2, syntaxEnd2);
                         } else {
                             const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                             const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                            this._applyTag('invisible', syntaxStart1, syntaxEnd1);
                             
                             const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                             const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                            this._applyTag('invisible', syntaxStart2, syntaxEnd2);
                         }
                         break;
                     }
@@ -1589,24 +1661,24 @@ class MarkdownRenderer {
                         
                         const start = this.buffer.get_iter_at_offset(matchStart);
                         const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this.buffer.apply_tag_by_name('italic', start, end);
+                        this._applyTag('italic', start, end);
                         
                         if (cursorInside) {
                             const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                             const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+                            this._applyTag('dim', syntaxStart1, syntaxEnd1);
                             
                             const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                             const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+                            this._applyTag('dim', syntaxStart2, syntaxEnd2);
                         } else {
                             const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                             const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                            this._applyTag('invisible', syntaxStart1, syntaxEnd1);
                             
                             const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                             const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                            this._applyTag('invisible', syntaxStart2, syntaxEnd2);
                         }
                         break;
                     }
@@ -1631,27 +1703,27 @@ class MarkdownRenderer {
             // Apply formatting tag to entire match
             const start = this.buffer.get_iter_at_offset(matchStart);
             const end = this.buffer.get_iter_at_offset(matchEnd);
-            this.buffer.apply_tag_by_name(tagName, start, end);
+            this._applyTag(tagName, start, end);
             
             // Show syntax markers only when cursor is inside
             if (cursorInside) {
                 // Dim the syntax markers (visible but subtle)
                 const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                 const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                this.buffer.apply_tag_by_name('dim', syntaxStart1, syntaxEnd1);
+                this._applyTag('dim', syntaxStart1, syntaxEnd1);
                 
                 const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                 const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                this.buffer.apply_tag_by_name('dim', syntaxStart2, syntaxEnd2);
+                this._applyTag('dim', syntaxStart2, syntaxEnd2);
             } else {
                 // Cursor is outside - make syntax invisible
                 const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
                 const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                this.buffer.apply_tag_by_name('invisible', syntaxStart1, syntaxEnd1);
+                this._applyTag('invisible', syntaxStart1, syntaxEnd1);
                 
                 const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
                 const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                this.buffer.apply_tag_by_name('invisible', syntaxStart2, syntaxEnd2);
+                this._applyTag('invisible', syntaxStart2, syntaxEnd2);
             }
         }
     }
@@ -1674,52 +1746,52 @@ class MarkdownRenderer {
             // Apply link tag to text
             const linkStart = this.buffer.get_iter_at_offset(textStart);
             const linkEnd = this.buffer.get_iter_at_offset(textEnd);
-            this.buffer.apply_tag_by_name('link', linkStart, linkEnd);
+            this._applyTag('link', linkStart, linkEnd);
             
             // Show URL and syntax when cursor is inside
             if (cursorInside) {
                 // Apply link-url tag to URL (visible)
                 const urlStartIter = this.buffer.get_iter_at_offset(urlStart);
                 const urlEndIter = this.buffer.get_iter_at_offset(urlEnd);
-                this.buffer.apply_tag_by_name('link-url', urlStartIter, urlEndIter);
+                this._applyTag('link-url', urlStartIter, urlEndIter);
                 
                 // Dim the brackets and parentheses
                 const bracket1 = this.buffer.get_iter_at_offset(matchStart);
                 const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+                this._applyTag('dim', bracket1, bracket2);
                 
                 const bracket3 = this.buffer.get_iter_at_offset(textEnd);
                 const bracket4 = this.buffer.get_iter_at_offset(textEnd + 1);
-                this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+                this._applyTag('dim', bracket3, bracket4);
                 
                 const paren1 = this.buffer.get_iter_at_offset(urlStart - 1);
                 const paren2 = this.buffer.get_iter_at_offset(urlStart);
-                this.buffer.apply_tag_by_name('dim', paren1, paren2);
+                this._applyTag('dim', paren1, paren2);
                 
                 const paren3 = this.buffer.get_iter_at_offset(urlEnd);
                 const paren4 = this.buffer.get_iter_at_offset(urlEnd + 1);
-                this.buffer.apply_tag_by_name('dim', paren3, paren4);
+                this._applyTag('dim', paren3, paren4);
             } else {
                 // Hide URL and syntax when cursor is outside
                 const urlStartIter = this.buffer.get_iter_at_offset(urlStart);
                 const urlEndIter = this.buffer.get_iter_at_offset(urlEnd);
-                this.buffer.apply_tag_by_name('invisible', urlStartIter, urlEndIter);
+                this._applyTag('invisible', urlStartIter, urlEndIter);
                 
                 const bracket1 = this.buffer.get_iter_at_offset(matchStart);
                 const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this.buffer.apply_tag_by_name('invisible', bracket1, bracket2);
+                this._applyTag('invisible', bracket1, bracket2);
                 
                 const bracket3 = this.buffer.get_iter_at_offset(textEnd);
                 const bracket4 = this.buffer.get_iter_at_offset(textEnd + 1);
-                this.buffer.apply_tag_by_name('invisible', bracket3, bracket4);
+                this._applyTag('invisible', bracket3, bracket4);
                 
                 const paren1 = this.buffer.get_iter_at_offset(urlStart - 1);
                 const paren2 = this.buffer.get_iter_at_offset(urlStart);
-                this.buffer.apply_tag_by_name('invisible', paren1, paren2);
+                this._applyTag('invisible', paren1, paren2);
                 
                 const paren3 = this.buffer.get_iter_at_offset(urlEnd);
                 const paren4 = this.buffer.get_iter_at_offset(urlEnd + 1);
-                this.buffer.apply_tag_by_name('invisible', paren3, paren4);
+                this._applyTag('invisible', paren3, paren4);
             }
         }
     }
@@ -1747,33 +1819,33 @@ class MarkdownRenderer {
             
             if (cursorInside) {
                 // When cursor is inside, use tags without background
-                this.buffer.apply_tag_by_name(isChecked ? 'todo-checked-inside' : 'todo-unchecked-inside', start, end);
+                this._applyTag(isChecked ? 'todo-checked-inside' : 'todo-unchecked-inside', start, end);
                 
                 // Show the actual syntax when cursor is inside - dim everything (brackets and X)
                 const bracket1 = this.buffer.get_iter_at_offset(matchStart);
                 const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this.buffer.apply_tag_by_name('dim', bracket1, bracket2);
+                this._applyTag('dim', bracket1, bracket2);
                 
                 // Dim the middle character (X or space) as well
                 const middle1 = this.buffer.get_iter_at_offset(matchStart + 1);
                 const middle2 = this.buffer.get_iter_at_offset(matchStart + 2);
-                this.buffer.apply_tag_by_name('dim', middle1, middle2);
+                this._applyTag('dim', middle1, middle2);
                 
                 const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
                 const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
-                this.buffer.apply_tag_by_name('dim', bracket3, bracket4);
+                this._applyTag('dim', bracket3, bracket4);
             } else {
                 // When cursor is outside, use tags with background
-                this.buffer.apply_tag_by_name(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
+                this._applyTag(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
                 
                 // Hide the brackets to make it look cleaner
                 const bracket1 = this.buffer.get_iter_at_offset(matchStart);
                 const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this.buffer.apply_tag_by_name('invisible', bracket1, bracket2);
+                this._applyTag('invisible', bracket1, bracket2);
                 
                 const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
                 const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
-                this.buffer.apply_tag_by_name('invisible', bracket3, bracket4);
+                this._applyTag('invisible', bracket3, bracket4);
             }
         }
     }
@@ -1904,6 +1976,14 @@ class JotWindow extends Adw.ApplicationWindow {
         buffer.place_cursor(iter);
         
         this._textView.grab_focus();
+        
+        // Setup periodic performance counter logging (every 5 seconds)
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 5000, () => {
+            perfLogger.logCounters();
+            return true; // Continue repeating
+        });
+        
+        perfLogger.logEvent('APP', 'Window initialized');
     }
 
     _buildUI() {
@@ -2278,25 +2358,31 @@ class JotWindow extends Adw.ApplicationWindow {
     _setupKeyboardShortcuts() {
         const keyController = new Gtk.EventControllerKey();
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            perfLogger.incrementCounter('key-pressed');
             // Debug: log Ctrl key presses
             if (state & CTRL_MASK) {
+                perfLogger.incrementCounter('ctrl-key-pressed');
                 print(`Ctrl key pressed: keyval=${keyval}, keycode=${keycode}`);
             }
             
             if (keyval === KEY_ESCAPE) {
+                perfLogger.logEvent('KEY', 'ESC pressed');
                 this.close();
                 return true;
             }
             if ((keyval === KEY_ENTER || keyval === KEY_S) && (state & CTRL_MASK)) {
+                perfLogger.logEvent('KEY', 'Ctrl+Enter/S (save)');
                 this._saveNote();
                 return true;
             }
             if (keyval === KEY_N && (state & CTRL_MASK)) {
+                perfLogger.logEvent('KEY', 'Ctrl+N (new file)');
                 this._newFile();
                 return true;
             }
             // Zoom in: Ctrl + or Ctrl = (multiple keycodes for compatibility)
             if ((keyval === KEY_PLUS || keyval === 43 || keyval === 61 || keyval === 65451 || keyval === 65455) && (state & CTRL_MASK)) {
+                perfLogger.logEvent('KEY', 'Ctrl++ (zoom in)');
                 this._zoomIn();
                 return true;
             }
@@ -2474,24 +2560,42 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _zoomIn() {
+        perfLogger.startTimer('zoom-in');
         this._zoomLevel = Math.min(this._zoomLevel + 10, 300); // Max 300%
         print(`Zoom in called, new level: ${this._zoomLevel}%`);
         this._applyCSS();
+        // Trigger markdown re-render to update styling after zoom
+        if (this._markdownRenderer) {
+            this._markdownRenderer._updateSyntaxVisibility();
+        }
         this._showZoomLevel();
+        perfLogger.endTimer('zoom-in', `(level: ${this._zoomLevel}%)`);
     }
 
     _zoomOut() {
+        perfLogger.startTimer('zoom-out');
         this._zoomLevel = Math.max(this._zoomLevel - 10, 50); // Min 50%
         print(`Zoom out called, new level: ${this._zoomLevel}%`);
         this._applyCSS();
+        // Trigger markdown re-render to update styling after zoom
+        if (this._markdownRenderer) {
+            this._markdownRenderer._updateSyntaxVisibility();
+        }
         this._showZoomLevel();
+        perfLogger.endTimer('zoom-out', `(level: ${this._zoomLevel}%)`);
     }
 
     _zoomReset() {
+        perfLogger.startTimer('zoom-reset');
         this._zoomLevel = 100;
         print(`Zoom reset called, level: ${this._zoomLevel}%`);
         this._applyCSS();
+        // Trigger markdown re-render to update styling after zoom
+        if (this._markdownRenderer) {
+            this._markdownRenderer._updateSyntaxVisibility();
+        }
         this._showZoomLevel();
+        perfLogger.endTimer('zoom-reset');
     }
 
     _showZoomLevel() {
