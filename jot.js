@@ -850,18 +850,31 @@ class MarkdownRenderer {
     }
     
     _setupSignals() {
-        // Update on text changes with debouncing (50ms delay)
+        // Update on text changes with debouncing (50ms delay, or immediate for headers)
         this.buffer.connect('changed', () => {
             if (!this.updating) {
                 // Mark that text just changed to prevent cursor flicker
                 this._textJustChanged = true;
                 
+                // Check if cursor is on a header line
+                const cursor = this.buffer.get_insert();
+                const cursorIter = this.buffer.get_iter_at_mark(cursor);
+                const lineStart = cursorIter.copy();
+                lineStart.set_line_offset(0);
+                const lineEnd = cursorIter.copy();
+                if (!lineEnd.ends_line()) {
+                    lineEnd.forward_to_line_end();
+                }
+                const lineText = this.buffer.get_text(lineStart, lineEnd, false);
+                const isHeader = /^#{1,}\s+/.test(lineText);
+                
                 // Cancel previous timeout if exists
                 if (this._renderTimeoutId) {
                     GLib.source_remove(this._renderTimeoutId);
                 }
-                // Schedule new render (cursor-aware so syntax shows where we're typing)
-                this._renderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
+                
+                if (isHeader) {
+                    // For headers, render immediately
                     this._updateSyntaxVisibility();
                     this._renderTimeoutId = null;
                     // Reset the flag after a short delay to allow cursor updates again
@@ -869,8 +882,19 @@ class MarkdownRenderer {
                         this._textJustChanged = false;
                         return false;
                     });
-                    return false;
-                });
+                } else {
+                    // For other content, use debouncing
+                    this._renderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
+                        this._updateSyntaxVisibility();
+                        this._renderTimeoutId = null;
+                        // Reset the flag after a short delay to allow cursor updates again
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
+                            this._textJustChanged = false;
+                            return false;
+                        });
+                        return false;
+                    });
+                }
             }
         });
         
@@ -2297,36 +2321,259 @@ class JotWindow extends Adw.ApplicationWindow {
             // Handle Tab key (65289)
             if (keyval === 65289 && !(state & CTRL_MASK)) {
                 print('Tab key detected');
-                const bulletMatch = lineText.match(/^(\s*)([-*])(\s+.*)$/);
-                if (bulletMatch) {
-                    print('Indenting bullet');
-                    const [, indent, bullet, rest] = bulletMatch;
-                    const newLine = `  ${indent}${bullet}${rest}`;
-                    const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                    const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
-                    buffer.delete(lineStart, lineEnd);
-                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
-                    buffer.insert(insertIter, newLine, -1);
-                    return true;
+                
+                // Check if there's a selection
+                const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+                
+                if (hasSelection) {
+                    // Multi-line selection: indent all selected bullet lines
+                    const selStartOffset = selStart.get_offset();
+                    const selEndOffset = selEnd.get_offset();
+                    
+                    // Find which lines are selected
+                    let offset = 0;
+                    let firstLineNum = -1;
+                    let lastLineNum = -1;
+                    
+                    for (let i = 0; i < lines.length; i++) {
+                        const lineLength = lines[i].length;
+                        const lineEndOffset = offset + lineLength;
+                        
+                        // Check if this line is partially or fully selected
+                        if (selStartOffset <= lineEndOffset && selEndOffset >= offset) {
+                            if (firstLineNum === -1) firstLineNum = i;
+                            lastLineNum = i;
+                        }
+                        
+                        offset += lineLength + 1; // +1 for newline
+                    }
+                    
+                    if (firstLineNum !== -1 && lastLineNum !== -1) {
+                        // Check if any selected lines are bullets
+                        let anyBullets = false;
+                        for (let i = firstLineNum; i <= lastLineNum; i++) {
+                            if (lines[i].match(/^(\s*)([-*])(\s+.*)$/)) {
+                                anyBullets = true;
+                                break;
+                            }
+                        }
+                        
+                        if (anyBullets) {
+                            print(`Indenting ${lastLineNum - firstLineNum + 1} lines`);
+                            
+                            // Find which line the selection start is on
+                            let selStartLineNum = -1;
+                            let lineOffset = 0;
+                            for (let i = 0; i < lines.length; i++) {
+                                const lineEnd = lineOffset + lines[i].length;
+                                if (selStartOffset >= lineOffset && selStartOffset <= lineEnd) {
+                                    selStartLineNum = i;
+                                    break;
+                                }
+                                lineOffset += lines[i].length + 1; // +1 for newline
+                            }
+                            
+                            // Build the new text with all lines indented
+                            const newLines = [];
+                            let spacesAddedAtOrBeforeSelStart = 0;
+                            let totalSpacesAdded = 0;
+                            
+                            for (let i = 0; i < lines.length; i++) {
+                                if (i >= firstLineNum && i <= lastLineNum) {
+                                    const bulletMatch = lines[i].match(/^(\s*)([-*])(\s+.*)$/);
+                                    if (bulletMatch) {
+                                        const [, indent, bullet, rest] = bulletMatch;
+                                        newLines.push(`  ${indent}${bullet}${rest}`);
+                                        
+                                        // Track spaces added up to and including selection start line
+                                        if (i <= selStartLineNum) {
+                                            spacesAddedAtOrBeforeSelStart += 2;
+                                        }
+                                        totalSpacesAdded += 2;
+                                    } else {
+                                        newLines.push(lines[i]);
+                                    }
+                                } else {
+                                    newLines.push(lines[i]);
+                                }
+                            }
+                            
+                            // Replace all text as a single undo action
+                            buffer.begin_user_action();
+                            const [bufStart, bufEnd] = buffer.get_bounds();
+                            buffer.delete(bufStart, bufEnd);
+                            buffer.insert(bufStart, newLines.join('\n'), -1);
+                            
+                            // Restore selection (adjusted for added spaces)
+                            const newSelStart = buffer.get_iter_at_offset(selStartOffset + spacesAddedAtOrBeforeSelStart);
+                            const newSelEnd = buffer.get_iter_at_offset(selEndOffset + totalSpacesAdded);
+                            buffer.select_range(newSelStart, newSelEnd);
+                            buffer.end_user_action();
+                            
+                            // Force immediate re-render to avoid visual glitch
+                            if (this._markdownRenderer) {
+                                this._markdownRenderer._updateSyntaxVisibility();
+                            }
+                            
+                            return true;
+                        }
+                    }
+                } else {
+                    // Single line: original behavior
+                    const bulletMatch = lineText.match(/^(\s*)([-*])(\s+.*)$/);
+                    if (bulletMatch) {
+                        print('Indenting bullet');
+                        const [, indent, bullet, rest] = bulletMatch;
+                        const newLine = `  ${indent}${bullet}${rest}`;
+                        
+                        // Wrap in user action for proper undo
+                        buffer.begin_user_action();
+                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
+                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                        buffer.delete(lineStart, lineEnd);
+                        const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                        buffer.insert(insertIter, newLine, -1);
+                        buffer.end_user_action();
+                        
+                        // Force immediate re-render to avoid visual glitch
+                        if (this._markdownRenderer) {
+                            this._markdownRenderer._updateSyntaxVisibility();
+                        }
+                        
+                        return true;
+                    }
                 }
             }
             
             // Handle Shift+Tab key (ISO_Left_Tab = 65056)
             if (keyval === 65056) {
                 print('Shift+Tab detected');
-                const bulletMatch = lineText.match(/^(\s+)([-*])(\s+.*)$/);
-                if (bulletMatch) {
-                    print('Outdenting bullet');
-                    const [, indent, bullet, rest] = bulletMatch;
-                    // Remove up to 2 spaces
-                    const newIndent = indent.length >= 2 ? indent.substring(2) : '';
-                    const newLine = `${newIndent}${bullet}${rest}`;
-                    const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                    const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
-                    buffer.delete(lineStart, lineEnd);
-                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
-                    buffer.insert(insertIter, newLine, -1);
-                    return true;
+                
+                // Check if there's a selection
+                const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+                
+                if (hasSelection) {
+                    // Multi-line selection: outdent all selected bullet lines
+                    const selStartOffset = selStart.get_offset();
+                    const selEndOffset = selEnd.get_offset();
+                    
+                    // Find which lines are selected
+                    let offset = 0;
+                    let firstLineNum = -1;
+                    let lastLineNum = -1;
+                    
+                    for (let i = 0; i < lines.length; i++) {
+                        const lineLength = lines[i].length;
+                        const lineEndOffset = offset + lineLength;
+                        
+                        // Check if this line is partially or fully selected
+                        if (selStartOffset <= lineEndOffset && selEndOffset >= offset) {
+                            if (firstLineNum === -1) firstLineNum = i;
+                            lastLineNum = i;
+                        }
+                        
+                        offset += lineLength + 1; // +1 for newline
+                    }
+                    
+                    if (firstLineNum !== -1 && lastLineNum !== -1) {
+                        // Check if any selected lines are bullets with indentation
+                        let anyIndentedBullets = false;
+                        for (let i = firstLineNum; i <= lastLineNum; i++) {
+                            if (lines[i].match(/^(\s+)([-*])(\s+.*)$/)) {
+                                anyIndentedBullets = true;
+                                break;
+                            }
+                        }
+                        
+                        if (anyIndentedBullets) {
+                            print(`Outdenting ${lastLineNum - firstLineNum + 1} lines`);
+                            
+                            // Find which line the selection start is on
+                            let selStartLineNum = -1;
+                            let lineOffset = 0;
+                            for (let i = 0; i < lines.length; i++) {
+                                const lineEnd = lineOffset + lines[i].length;
+                                if (selStartOffset >= lineOffset && selStartOffset <= lineEnd) {
+                                    selStartLineNum = i;
+                                    break;
+                                }
+                                lineOffset += lines[i].length + 1; // +1 for newline
+                            }
+                            
+                            // Build the new text with all lines outdented
+                            const newLines = [];
+                            let spacesRemovedAtOrBeforeSelStart = 0;
+                            let totalSpacesRemoved = 0;
+                            
+                            for (let i = 0; i < lines.length; i++) {
+                                if (i >= firstLineNum && i <= lastLineNum) {
+                                    const bulletMatch = lines[i].match(/^(\s+)([-*])(\s+.*)$/);
+                                    if (bulletMatch) {
+                                        const [, indent, bullet, rest] = bulletMatch;
+                                        // Remove up to 2 spaces
+                                        const spacesRemoved = Math.min(2, indent.length);
+                                        const newIndent = indent.substring(spacesRemoved);
+                                        newLines.push(`${newIndent}${bullet}${rest}`);
+                                        
+                                        // Track spaces removed up to and including selection start line
+                                        if (i <= selStartLineNum) {
+                                            spacesRemovedAtOrBeforeSelStart += spacesRemoved;
+                                        }
+                                        totalSpacesRemoved += spacesRemoved;
+                                    } else {
+                                        newLines.push(lines[i]);
+                                    }
+                                } else {
+                                    newLines.push(lines[i]);
+                                }
+                            }
+                            
+                            // Replace all text as a single undo action
+                            buffer.begin_user_action();
+                            const [bufStart, bufEnd] = buffer.get_bounds();
+                            buffer.delete(bufStart, bufEnd);
+                            buffer.insert(bufStart, newLines.join('\n'), -1);
+                            
+                            // Restore selection (adjusted for removed spaces)
+                            const newSelStart = buffer.get_iter_at_offset(Math.max(0, selStartOffset - spacesRemovedAtOrBeforeSelStart));
+                            const newSelEnd = buffer.get_iter_at_offset(Math.max(0, selEndOffset - totalSpacesRemoved));
+                            buffer.select_range(newSelStart, newSelEnd);
+                            buffer.end_user_action();
+                            
+                            // Force immediate re-render to avoid visual glitch
+                            if (this._markdownRenderer) {
+                                this._markdownRenderer._updateSyntaxVisibility();
+                            }
+                            
+                            return true;
+                        }
+                    }
+                } else {
+                    // Single line: original behavior
+                    const bulletMatch = lineText.match(/^(\s+)([-*])(\s+.*)$/);
+                    if (bulletMatch) {
+                        print('Outdenting bullet');
+                        const [, indent, bullet, rest] = bulletMatch;
+                        // Remove up to 2 spaces
+                        const newIndent = indent.length >= 2 ? indent.substring(2) : '';
+                        const newLine = `${newIndent}${bullet}${rest}`;
+                        
+                        // Wrap in user action for proper undo
+                        buffer.begin_user_action();
+                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
+                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                        buffer.delete(lineStart, lineEnd);
+                        const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                        buffer.insert(insertIter, newLine, -1);
+                        buffer.end_user_action();
+                        
+                        // Force immediate re-render to avoid visual glitch
+                        if (this._markdownRenderer) {
+                            this._markdownRenderer._updateSyntaxVisibility();
+                        }
+                        
+                        return true;
+                    }
                 }
             }
             
