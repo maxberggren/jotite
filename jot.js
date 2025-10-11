@@ -1353,6 +1353,23 @@ class MarkdownRenderer {
             const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
             const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
             this._applyTag('dim', bracket3, bracket4);
+            
+            // If checked, apply strikethrough and dimming to the text after the checkbox
+            if (isChecked) {
+                // Find text after the checkbox (skip any spaces after the checkbox)
+                const textAfterCheckbox = line.substring(match.index + 3); // Everything after [X]
+                const textMatch = textAfterCheckbox.match(/^\s*/); // Find leading spaces
+                const spacesLength = textMatch ? textMatch[0].length : 0;
+                const textStart = matchEnd + spacesLength;
+                const textEnd = lineOffset + line.length;
+                
+                // Apply strikethrough and dimming to the text after the checkbox
+                if (textStart < textEnd) {
+                    const textStartIter = this.buffer.get_iter_at_offset(textStart);
+                    const textEndIter = this.buffer.get_iter_at_offset(textEnd);
+                    this._applyTag('todo-checked-text', textStartIter, textEndIter);
+                }
+            }
         }
     }
     
