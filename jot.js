@@ -12,7 +12,6 @@ const THEME_PATH = ['.config', 'omarchy', 'current', 'theme', 'alacritty.toml'];
 const FEEDBACK_TIMEOUT_MS = 3000;
 
 // Keyboard constants
-const KEY_ESCAPE = 65307;
 const KEY_ENTER = 65293;
 const KEY_S = 115;
 const KEY_S_UPPER = 83;  // 'S' key (with shift)
@@ -2152,7 +2151,7 @@ class JotApplication extends Adw.Application {
     _init() {
         super._init({
             application_id: APP_ID,
-            flags: Gio.ApplicationFlags.HANDLES_OPEN,
+            flags: Gio.ApplicationFlags.HANDLES_OPEN | Gio.ApplicationFlags.NON_UNIQUE,
         });
         this._fileToOpen = null;
         
@@ -2206,7 +2205,6 @@ class JotApplication extends Adw.Application {
             if (!fontFile.query_exists(null)) {
                 print(`Warning: Font file not found at ${fontSourcePath}`);
                 print('Please ensure pxlxxl.ttf is in the same directory as jot.js');
-                print('Run ./install-font.sh to install the font manually');
                 return;
             }
             
@@ -2242,15 +2240,12 @@ class JotApplication extends Adw.Application {
         } catch (e) {
             print(`ERROR: Could not auto-install font: ${e.message}`);
             print(`Stack trace: ${e.stack || 'N/A'}`);
-            print('Please run ./install-font.sh to install the font manually');
         }
     }
 
     vfunc_activate() {
-        let window = this.active_window;
-        if (!window) {
-            window = new JotWindow(this);
-        }
+        // Always create a new window to allow multiple instances
+        const window = new JotWindow(this);
 
         if (this._fileToOpen) {
             window.loadFile(this._fileToOpen);
@@ -2942,10 +2937,6 @@ class JotWindow extends Adw.ApplicationWindow {
     _setupKeyboardShortcuts() {
         const keyController = new Gtk.EventControllerKey();
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
-            if (keyval === KEY_ESCAPE) {
-                this.close();
-                return true;
-            }
             if ((keyval === KEY_ENTER || keyval === KEY_S) && (state & CTRL_MASK) && !(state & SHIFT_MASK)) {
                 this._saveNote();
                 return true;
