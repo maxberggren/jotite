@@ -465,7 +465,9 @@ class MarkdownRenderer {
         // Remove existing tags if they exist
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
+         'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'bullet-star', 'bullet-star-near', 
+         'bullet-margin', 'sub-bullet-margin', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
+         'todo-unchecked-inside', 'todo-checked-inside',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
         
         // Add gradient background tags to removal list for all moods
@@ -1830,24 +1832,50 @@ class JotApplication extends Adw.Application {
             const [, checkOutput] = GLib.spawn_command_line_sync(checkCmd.join(' '));
             const fontList = new TextDecoder().decode(checkOutput);
             
-            if (fontList.includes('pxlxxl')) {
+            if (fontList.toLowerCase().includes('pxlxxl')) {
                 print('Font pxlxxl already installed');
                 return;
             }
             
             print('Font pxlxxl not found, installing...');
             
-            // Get the directory where jot.js is located
-            const scriptPath = GLib.path_get_dirname(imports.system.programPath);
+            // Try multiple methods to find the script directory
+            let scriptPath = null;
+            
+            // Method 1: Try using imports.system.programInvocationName (the actual script path)
+            if (imports.system.programInvocationName) {
+                const invocationPath = imports.system.programInvocationName;
+                print(`Trying invocation path: ${invocationPath}`);
+                if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
+                    scriptPath = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
+                }
+            }
+            
+            // Method 2: Try programPath
+            if (!scriptPath) {
+                scriptPath = GLib.path_get_dirname(imports.system.programPath);
+                print(`Trying program path: ${scriptPath}`);
+            }
+            
+            // Method 3: Check current directory
+            if (!scriptPath || scriptPath === '/usr/bin') {
+                scriptPath = GLib.get_current_dir();
+                print(`Trying current directory: ${scriptPath}`);
+            }
+            
             const fontSourcePath = GLib.build_filenamev([scriptPath, 'pxlxxl.ttf']);
+            print(`Looking for font at: ${fontSourcePath}`);
             
             // Check if font file exists in script directory
             const fontFile = Gio.File.new_for_path(fontSourcePath);
             if (!fontFile.query_exists(null)) {
                 print(`Warning: Font file not found at ${fontSourcePath}`);
+                print('Please ensure pxlxxl.ttf is in the same directory as jot.js');
                 print('Run ./install-font.sh to install the font manually');
                 return;
             }
+            
+            print('Found font file, installing...');
             
             // Install to user fonts directory
             const fontDir = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'share', 'fonts', 'jot']);
@@ -1855,22 +1883,31 @@ class JotApplication extends Adw.Application {
             
             // Create directory if it doesn't exist
             if (!fontDirFile.query_exists(null)) {
+                print(`Creating font directory: ${fontDir}`);
                 fontDirFile.make_directory_with_parents(null);
             }
             
             // Copy font file
             const fontDestPath = GLib.build_filenamev([fontDir, 'pxlxxl.ttf']);
             const fontDestFile = Gio.File.new_for_path(fontDestPath);
+            print(`Copying font to: ${fontDestPath}`);
             fontFile.copy(fontDestFile, Gio.FileCopyFlags.OVERWRITE, null, null);
             
             // Update font cache
+            print('Updating font cache...');
             const updateCmd = ['fc-cache', '-f', fontDir];
-            GLib.spawn_command_line_sync(updateCmd.join(' '));
+            const [cacheSuccess, cacheOutput, cacheError] = GLib.spawn_command_line_sync(updateCmd.join(' '));
+            
+            if (!cacheSuccess) {
+                print(`Warning: fc-cache failed: ${new TextDecoder().decode(cacheError)}`);
+            }
             
             print(`✓ Font installed successfully to ${fontDir}`);
+            print('  Note: You may need to restart the application for the font to be available');
         } catch (e) {
-            print(`Warning: Could not auto-install font: ${e.message}`);
-            print('Run ./install-font.sh to install the font manually');
+            print(`ERROR: Could not auto-install font: ${e.message}`);
+            print(`Stack trace: ${e.stack || 'N/A'}`);
+            print('Please run ./install-font.sh to install the font manually');
         }
     }
 
