@@ -15,7 +15,9 @@ const FEEDBACK_TIMEOUT_MS = 3000;
 const KEY_ESCAPE = 65307;
 const KEY_ENTER = 65293;
 const KEY_S = 115;
+const KEY_S_UPPER = 83;  // 'S' key (with shift)
 const KEY_N = 110;       // 'n' key
+const KEY_O = 111;       // 'o' key
 const KEY_X = 120;       // 'x' key
 const KEY_PLUS = 61;     // '+' key (also '=' key without shift)
 const KEY_MINUS = 45;    // '-' key
@@ -23,6 +25,8 @@ const KEY_0 = 48;        // '0' key
 const KEY_UP = 65362;    // Up arrow key
 const KEY_DOWN = 65364;  // Down arrow key
 const CTRL_MASK = 4;
+const SHIFT_MASK = 1;
+const ALT_MASK = 8;
 
 // File patterns
 const FILE_PATTERNS = ['*.md', '*.txt'];
@@ -1928,7 +1932,6 @@ class JotWindow extends Adw.ApplicationWindow {
         this._currentFilename = 'untitled.md';
         this._currentFilePath = null; // Track the full path of opened file
         this._themeManager = new ThemeManager();
-        this._lastSaveClickTime = 0; // Track double-click for Save As
         this._zoomLevel = 100; // Zoom level percentage (default 100%)
         this._zoomTimeoutId = null; // Track zoom indicator timeout
         this._filenameUpdateTimeoutId = null; // Track filename update debouncing
@@ -2231,7 +2234,24 @@ class JotWindow extends Adw.ApplicationWindow {
         const saveButton = new Gtk.Button({ label: 'Save' });
         saveButton.add_css_class('jot-button');
         saveButton.add_css_class('jot-button-save');
-        saveButton.connect('clicked', () => this._saveNote());
+        
+        // Add gesture click controller to detect Alt+click
+        const gesture = new Gtk.GestureClick();
+        gesture.connect('pressed', (gesture, n_press, x, y) => {
+            const event = gesture.get_current_event();
+            const state = event.get_modifier_state();
+            
+            if (state & ALT_MASK) {
+                // Alt+click: show Save As dialog
+                this._showSaveAsDialog();
+                gesture.set_state(Gtk.EventSequenceState.CLAIMED);
+            } else {
+                // Normal click: regular save
+                this._saveNote();
+                gesture.set_state(Gtk.EventSequenceState.CLAIMED);
+            }
+        });
+        saveButton.add_controller(gesture);
 
         buttonBox.append(openButton);
         buttonBox.append(cancelButton);
@@ -2327,12 +2347,20 @@ class JotWindow extends Adw.ApplicationWindow {
                 this.close();
                 return true;
             }
-            if ((keyval === KEY_ENTER || keyval === KEY_S) && (state & CTRL_MASK)) {
+            if ((keyval === KEY_ENTER || keyval === KEY_S) && (state & CTRL_MASK) && !(state & SHIFT_MASK)) {
                 this._saveNote();
+                return true;
+            }
+            if ((keyval === KEY_S_UPPER || keyval === KEY_S) && (state & CTRL_MASK) && (state & SHIFT_MASK)) {
+                this._showSaveAsDialog();
                 return true;
             }
             if (keyval === KEY_N && (state & CTRL_MASK)) {
                 this._newFile();
+                return true;
+            }
+            if (keyval === KEY_O && (state & CTRL_MASK)) {
+                this._openFileDialog();
                 return true;
             }
             // Zoom in: Ctrl + or Ctrl = (multiple keycodes for compatibility)
@@ -2415,27 +2443,31 @@ class JotWindow extends Adw.ApplicationWindow {
             this._showFeedback('⚠ Nothing to save');
             return;
         }
-
-        const title = this._extractTitleFromContent();
         
-        // Check for double-click (within 1 second)
-        const currentTime = GLib.get_monotonic_time() / 1000; // Convert to milliseconds
-        const timeSinceLastClick = currentTime - this._lastSaveClickTime;
-        const isDoubleClick = timeSinceLastClick < 1000;
-        this._lastSaveClickTime = currentTime;
-        
-        // If file exists and not double-click, just save directly
-        if (this._currentFilePath && !isDoubleClick) {
+        // If file exists, just save directly
+        if (this._currentFilePath) {
             const file = Gio.File.new_for_path(this._currentFilePath);
             this._saveToFile(file, content);
             return;
         }
         
-        // Show "Save As" dialog for new files or double-click
+        // Show "Save As" dialog for new files
         this._showSaveAsDialog(content);
     }
     
     _showSaveAsDialog(content) {
+        // Get content from buffer if not provided
+        if (!content) {
+            const buffer = this._textView.get_buffer();
+            const [start, end] = buffer.get_bounds();
+            content = buffer.get_text(start, end, false);
+        }
+        
+        if (!content.trim()) {
+            this._showFeedback('⚠ Nothing to save');
+            return;
+        }
+        
         const title = this._extractTitleFromContent();
         
         // Create file save dialog using FileChooserNative
