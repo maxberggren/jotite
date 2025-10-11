@@ -467,8 +467,9 @@ class MarkdownRenderer {
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
          'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'bullet-star', 'bullet-star-near', 
          'bullet-margin', 'sub-bullet-margin', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
-         'todo-unchecked-inside', 'todo-checked-inside',
-         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
+         'todo-unchecked-inside', 'todo-checked-inside', 'todo-checked-text',
+         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
+         'table-pipe', 'table-separator', 'table-header', 'table-cell'];
         
         // Add gradient background tags to removal list for all moods
         const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
@@ -787,6 +788,14 @@ class MarkdownRenderer {
         });
         tagTable.add(todoCheckedInsideTag);
         
+        // Tag for checked todo text (strikethrough and dimmed)
+        const todoCheckedTextTag = new Gtk.TextTag({
+            name: 'todo-checked-text',
+            strikethrough: true,
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.3),
+        });
+        tagTable.add(todoCheckedTextTag);
+        
         // Dim tag for markdown syntax (when cursor is inside)
         const dimTag = new Gtk.TextTag({
             name: 'dim',
@@ -813,6 +822,31 @@ class MarkdownRenderer {
             scale: 0.01,
         });
         tagTable.add(invisibleTag);
+        
+        // Table tags
+        const tablePipeTag = new Gtk.TextTag({
+            name: 'table-pipe',
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.25),
+        });
+        tagTable.add(tablePipeTag);
+        
+        const tableSeparatorTag = new Gtk.TextTag({
+            name: 'table-separator',
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.25),
+        });
+        tagTable.add(tableSeparatorTag);
+        
+        const tableHeaderTag = new Gtk.TextTag({
+            name: 'table-header',
+            weight: 700,
+            foreground: this.colors.blue,
+        });
+        tagTable.add(tableHeaderTag);
+        
+        const tableCellTag = new Gtk.TextTag({
+            name: 'table-cell',
+        });
+        tagTable.add(tableCellTag);
     }
     
     _setupSignals() {
@@ -1012,8 +1046,9 @@ class MarkdownRenderer {
         // Remove syntax tags but preserve margin tags
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
-         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6'];
+         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'todo-checked-text', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
+         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
+         'table-pipe', 'table-separator', 'table-header', 'table-cell'];
         
         // Add gradient background tags to removal list for all moods
         const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
@@ -1147,6 +1182,9 @@ class MarkdownRenderer {
         
         // Todo items: apply pattern for [ ] and [X] (but styling happens in cursor-aware version)
         this._applyTodoPattern(line, lineOffset);
+        
+        // Table rows: detect and style pipes and cells
+        this._applyTablePattern(line, lineOffset);
         
         // Process patterns in order: bold first, then italic, then code, then strikethrough
         // Bold: **text** or __text__
@@ -1501,6 +1539,9 @@ class MarkdownRenderer {
         // Todo items with cursor awareness
         this._applyTodoPatternWithCursor(line, lineOffset, cursorOffset);
         
+        // Table rows: detect and style pipes and cells with cursor awareness
+        this._applyTablePatternWithCursor(line, lineOffset, cursorOffset);
+        
         // For inline patterns, check if cursor is inside each pattern
         // Process bold first, then italic, then code, then strikethrough
         // Bold takes priority so we process it before italic
@@ -1752,6 +1793,114 @@ class MarkdownRenderer {
                 const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
                 const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
                 this._applyTag('invisible', bracket3, bracket4);
+            }
+            
+            // If checked, apply strikethrough and dimming to the text after the checkbox
+            if (isChecked) {
+                // Find text after the checkbox (skip any spaces after the checkbox)
+                const textAfterCheckbox = line.substring(match.index + 3); // Everything after [X]
+                const textMatch = textAfterCheckbox.match(/^\s*/); // Find leading spaces
+                const spacesLength = textMatch ? textMatch[0].length : 0;
+                const textStart = matchEnd + spacesLength;
+                const textEnd = lineOffset + line.length;
+                
+                // Apply strikethrough and dimming to the text after the checkbox
+                if (textStart < textEnd) {
+                    const textStartIter = this.buffer.get_iter_at_offset(textStart);
+                    const textEndIter = this.buffer.get_iter_at_offset(textEnd);
+                    this._applyTag('todo-checked-text', textStartIter, textEndIter);
+                }
+            }
+        }
+    }
+    
+    _applyTablePattern(line, lineOffset) {
+        // Check if this line looks like a table row (contains pipes)
+        if (!line.includes('|')) return;
+        
+        // Check if it's a separator line (|---|---|---| or | --- | --- | --- |)
+        const isSeparator = /^\s*\|[\s\-:|]+\|\s*$/.test(line);
+        
+        // Find all pipe positions and apply styling
+        for (let i = 0; i < line.length; i++) {
+            if (line[i] === '|') {
+                const pipeStart = this.buffer.get_iter_at_offset(lineOffset + i);
+                const pipeEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
+                this._applyTag('table-pipe', pipeStart, pipeEnd);
+            }
+        }
+        
+        // If it's a separator line, style the dashes and colons
+        if (isSeparator) {
+            for (let i = 0; i < line.length; i++) {
+                if (line[i] === '-' || line[i] === ':') {
+                    const charStart = this.buffer.get_iter_at_offset(lineOffset + i);
+                    const charEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
+                    this._applyTag('table-separator', charStart, charEnd);
+                }
+            }
+        }
+    }
+    
+    _applyTablePatternWithCursor(line, lineOffset, cursorOffset) {
+        // Check if this line looks like a table row (contains pipes)
+        if (!line.includes('|')) return;
+        
+        // Check if it's a separator line (|---|---|---| or | --- | --- | --- |)
+        const isSeparator = /^\s*\|[\s\-:|]+\|\s*$/.test(line);
+        
+        // Check if it's a header line (we need to look back one line, but for simplicity
+        // we'll check if the current line has pipes and the text isn't all dashes)
+        const isHeader = !isSeparator && line.trim().startsWith('|');
+        
+        const cursorOnLine = cursorOffset >= lineOffset && cursorOffset <= lineOffset + line.length;
+        
+        // Find all pipe positions and apply styling
+        for (let i = 0; i < line.length; i++) {
+            if (line[i] === '|') {
+                const pipeStart = this.buffer.get_iter_at_offset(lineOffset + i);
+                const pipeEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
+                
+                if (cursorOnLine) {
+                    // Show pipes when cursor is on the line
+                    this._applyTag('table-pipe', pipeStart, pipeEnd);
+                } else {
+                    // Dim pipes when cursor is away
+                    this._applyTag('table-pipe', pipeStart, pipeEnd);
+                }
+            }
+        }
+        
+        // If it's a separator line, style the dashes and colons
+        if (isSeparator) {
+            for (let i = 0; i < line.length; i++) {
+                if (line[i] === '-' || line[i] === ':') {
+                    const charStart = this.buffer.get_iter_at_offset(lineOffset + i);
+                    const charEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
+                    this._applyTag('table-separator', charStart, charEnd);
+                }
+            }
+        }
+        
+        // Parse cells and apply header styling if this is the first row
+        if (!isSeparator) {
+            const cells = line.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
+            
+            // Find cell positions and apply header styling
+            let currentPos = line.indexOf('|') + 1;
+            for (const cell of cells) {
+                const cellStart = line.indexOf(cell, currentPos);
+                if (cellStart !== -1) {
+                    const start = this.buffer.get_iter_at_offset(lineOffset + cellStart);
+                    const end = this.buffer.get_iter_at_offset(lineOffset + cellStart + cell.length);
+                    
+                    // Apply header tag to cells (in real implementation, we'd need to track
+                    // whether this is actually a header row by looking at the next line)
+                    // For now, we'll style all table content
+                    this._applyTag('table-cell', start, end);
+                    
+                    currentPos = cellStart + cell.length + 1;
+                }
             }
         }
     }
