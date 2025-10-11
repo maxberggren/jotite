@@ -415,6 +415,7 @@ class MarkdownRenderer {
         this.colors = colors;
         this.updating = false;
         this.lastCursorPosition = -1;
+        this._previousCursorPosition = -1; // Track position from previous update for arrow direction
         this._renderTimeoutId = null;
         this._cursorTimeoutId = null;
         this._textJustChanged = false; // Track if text was recently changed
@@ -939,6 +940,9 @@ class MarkdownRenderer {
         const movingForward = cursorOffset > this.lastCursorPosition;
         const movingBackward = cursorOffset < this.lastCursorPosition;
         const lastPos = this.lastCursorPosition;
+        
+        // Save previous position before updating for arrow direction tracking
+        this._previousCursorPosition = this.lastCursorPosition;
         this.lastCursorPosition = cursorOffset;
         
         // Don't adjust if we just adjusted or if cursor hasn't moved
@@ -1397,6 +1401,135 @@ class MarkdownRenderer {
         }
     }
     
+    _handleArrowTransformations(text, cursorOffset) {
+        // Track cursor movement direction using previous position
+        const movingRight = cursorOffset > this._previousCursorPosition;
+        const movingLeft = cursorOffset < this._previousCursorPosition;
+        
+        // Find all arrows (both ASCII and Unicode) and transform based on cursor position
+        const transformations = []; // [{offset, length, replacement, cursorPos}]
+        
+        // Find all -> and check if cursor is near
+        let index = 0;
+        while ((index = text.indexOf('->', index)) !== -1) {
+            const arrowStart = index;
+            const arrowEnd = index + 2;
+            const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
+            
+            if (!cursorNear) {
+                // Cursor is away, replace -> with →
+                transformations.push({
+                    offset: arrowStart,
+                    length: 2,
+                    replacement: '→',
+                    cursorPos: null
+                });
+            }
+            index = arrowEnd;
+        }
+        
+        // Find all <- and check if cursor is near
+        index = 0;
+        while ((index = text.indexOf('<-', index)) !== -1) {
+            const arrowStart = index;
+            const arrowEnd = index + 2;
+            const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
+            
+            if (!cursorNear) {
+                // Cursor is away, replace <- with ←
+                transformations.push({
+                    offset: arrowStart,
+                    length: 2,
+                    replacement: '←',
+                    cursorPos: null
+                });
+            }
+            index = arrowEnd;
+        }
+        
+        // Find all → and check if cursor is near
+        index = 0;
+        while ((index = text.indexOf('→', index)) !== -1) {
+            const arrowStart = index;
+            const arrowEnd = index + 1;
+            const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
+            
+            if (cursorNear) {
+                // Cursor is near, replace → with ->
+                // Position cursor based on entry direction
+                let newCursorPos;
+                if (movingRight) {
+                    // Entered from left, put cursor at start of arrow (offset 0 in "->")
+                    newCursorPos = arrowStart;
+                } else if (movingLeft) {
+                    // Entered from right, put cursor at end of arrow (offset 2 in "->")
+                    newCursorPos = arrowStart + 2;
+                } else {
+                    // No movement or clicked, put cursor at current position
+                    newCursorPos = arrowStart + (cursorOffset - arrowStart);
+                }
+                
+                transformations.push({
+                    offset: arrowStart,
+                    length: 1,
+                    replacement: '->',
+                    cursorPos: newCursorPos
+                });
+            }
+            index = arrowEnd;
+        }
+        
+        // Find all ← and check if cursor is near
+        index = 0;
+        while ((index = text.indexOf('←', index)) !== -1) {
+            const arrowStart = index;
+            const arrowEnd = index + 1;
+            const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
+            
+            if (cursorNear) {
+                // Cursor is near, replace ← with <-
+                // Position cursor based on entry direction
+                let newCursorPos;
+                if (movingRight) {
+                    // Entered from left, put cursor at start of arrow (offset 0 in "<-")
+                    newCursorPos = arrowStart;
+                } else if (movingLeft) {
+                    // Entered from right, put cursor at end of arrow (offset 2 in "<-")
+                    newCursorPos = arrowStart + 2;
+                } else {
+                    // No movement or clicked, put cursor at current position
+                    newCursorPos = arrowStart + (cursorOffset - arrowStart);
+                }
+                
+                transformations.push({
+                    offset: arrowStart,
+                    length: 1,
+                    replacement: '<-',
+                    cursorPos: newCursorPos
+                });
+            }
+            index = arrowEnd;
+        }
+        
+        // Apply transformations in reverse order to maintain offsets
+        transformations.sort((a, b) => b.offset - a.offset);
+        
+        for (const transform of transformations) {
+            const startIter = this.buffer.get_iter_at_offset(transform.offset);
+            const endIter = this.buffer.get_iter_at_offset(transform.offset + transform.length);
+            this.buffer.delete(startIter, endIter);
+            
+            const insertIter = this.buffer.get_iter_at_offset(transform.offset);
+            this.buffer.insert(insertIter, transform.replacement, -1);
+            
+            // Set cursor position if specified
+            if (transform.cursorPos !== null) {
+                const newCursorIter = this.buffer.get_iter_at_offset(transform.cursorPos);
+                this.buffer.place_cursor(newCursorIter);
+            }
+        }
+    }
+    
     _updateSyntaxVisibility() {
         if (this.updating) return;
         
@@ -1413,18 +1546,30 @@ class MarkdownRenderer {
         const [start, end] = this.buffer.get_bounds();
         const text = this.buffer.get_text(start, end, false);
         
+        // Handle arrow transformations based on cursor position
+        this._handleArrowTransformations(text, cursorOffset);
+        
+        // Get updated text after arrow transformations
+        const [start2, end2] = this.buffer.get_bounds();
+        const updatedText = this.buffer.get_text(start2, end2, false);
+        
+        // Update cursor offset if text length changed
+        const cursor2 = this.buffer.get_insert();
+        const cursorIter2 = this.buffer.get_iter_at_mark(cursor2);
+        const updatedCursorOffset = cursorIter2.get_offset();
+        
         // Remove only tags that were actually applied (Optimization #1)
         this._appliedTags.forEach(tagName => {
             const tag = this.buffer.get_tag_table().lookup(tagName);
             if (tag) {
-                this.buffer.remove_tag(tag, start, end);
+                this.buffer.remove_tag(tag, start2, end2);
             }
         });
         this._appliedTags.clear(); // Clear for next render
         
         // Find all markdown patterns and apply them
         // Show syntax markers only when cursor is inside the pattern
-        this._applyMarkdownWithCursorContext(text, cursorOffset);
+        this._applyMarkdownWithCursorContext(updatedText, updatedCursorOffset);
         
         this.updating = false;
     }
