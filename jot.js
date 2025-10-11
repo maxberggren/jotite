@@ -1991,6 +1991,31 @@ class JotWindow extends Adw.ApplicationWindow {
             hexpand: true,
         });
 
+        // Make bottom margin viewport-aware
+        const updateBottomMargin = () => {
+            const height = scrolledWindow.get_height();
+            if (height > 0) {
+                // Set bottom margin to viewport height minus a small buffer
+                this._textView.bottom_margin = Math.max(height - 40, 100);
+            }
+        };
+        
+        // Monitor vadjustment to detect viewport changes
+        scrolledWindow.connect('notify::vadjustment', updateBottomMargin);
+        
+        // Also watch for when vadjustment properties change
+        const vadj = scrolledWindow.get_vadjustment();
+        if (vadj) {
+            vadj.connect('changed', updateBottomMargin);
+            vadj.connect('notify::page-size', updateBottomMargin);
+        }
+        
+        // Initial update after a short delay to ensure window is sized
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
+            updateBottomMargin();
+            return false;
+        });
+
         return scrolledWindow;
     }
 
