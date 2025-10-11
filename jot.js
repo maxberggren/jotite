@@ -166,6 +166,15 @@ class ThemeManager {
     generateCSS(zoomLevel = 100) {
         const c = this.colors;
         const zoom = zoomLevel / 100;
+        
+        // Helper to convert hex to rgba
+        const hexToRgba = (hex, alpha) => {
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        };
+        
         return `
             window {
                 background: ${c.background};
@@ -226,12 +235,13 @@ class ThemeManager {
             }
 
             .jot-statusbar {
-                border-top: 1px solid ${c.white};
-                padding-top: 10px;
+                border-top: 1px solid ${hexToRgba(c.white, 0.2)};
+                padding-top: 4px;
             }
 
             .status-label {
                 color: ${c.white};
+                opacity: 0.3;
                 font-size: 12px;
             }
 
@@ -363,35 +373,6 @@ class ThemeManager {
             treeview:selected, listview:selected, list row:selected {
                 background: ${c.blue};
                 color: ${c.foreground};
-            }
-
-            /* Scrollbar styling - thin and minimal */
-            scrollbar {
-                background: transparent;
-            }
-
-            scrollbar.vertical slider {
-                min-width: 4px;
-                min-height: 40px;
-                background: rgba(255, 255, 255, 0.3);
-                border-radius: 2px;
-                margin: 2px;
-            }
-
-            scrollbar.horizontal slider {
-                min-height: 4px;
-                min-width: 40px;
-                background: rgba(255, 255, 255, 0.3);
-                border-radius: 2px;
-                margin: 2px;
-            }
-
-            scrollbar slider:hover {
-                background: rgba(255, 255, 255, 0.5);
-            }
-            
-            scrollbar slider:active {
-                background: ${c.blue};
             }
 
             /* Popover styling */
@@ -2189,11 +2170,11 @@ class JotWindow extends Adw.ApplicationWindow {
         this._statusBar = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
             spacing: 16,
-            height_request: 36,
-            margin_start: 16,
-            margin_end: 16,
-            margin_top: 8,
-            margin_bottom: 8,
+            height_request: 24,
+            margin_start: 0,
+            margin_end: 0,
+            margin_top: 4,
+            margin_bottom: 4,
         });
         this._statusBar.add_css_class('jot-statusbar');
 
@@ -2203,13 +2184,11 @@ class JotWindow extends Adw.ApplicationWindow {
             halign: Gtk.Align.START,
             hexpand: true,
             ellipsize: 3,
+            margin_start: 8,
         });
         this._pathLabel.add_css_class('status-label');
 
-        const buttonBox = this._createButtonBox();
-
         this._statusBar.append(this._pathLabel);
-        this._statusBar.append(buttonBox);
 
         return this._statusBar;
     }
