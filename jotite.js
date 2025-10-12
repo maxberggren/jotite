@@ -6,8 +6,8 @@ imports.gi.versions.Adw = '1';
 const { Gtk, Gio, GLib, Adw, GObject, Gdk } = imports.gi;
 
 // Constants
-const APP_ID = 'com.github.jot';
-const JOT_DIR = ['Documents', 'Jot'];
+const APP_ID = 'com.github.jotite';
+const JOT_DIR = ['Documents', 'Jotite'];
 const THEME_PATH = ['.config', 'omarchy', 'current', 'theme', 'alacritty.toml'];
 const FEEDBACK_TIMEOUT_MS = 3000;
 
@@ -2204,14 +2204,14 @@ class JotApplication extends Adw.Application {
             const fontFile = Gio.File.new_for_path(fontSourcePath);
             if (!fontFile.query_exists(null)) {
                 print(`Warning: Font file not found at ${fontSourcePath}`);
-                print('Please ensure pxlxxl.ttf is in the same directory as jot.js');
+                print('Please ensure pxlxxl.ttf is in the same directory as jotite.js');
                 return;
             }
             
             print('Found font file, installing...');
             
             // Install to user fonts directory
-            const fontDir = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'share', 'fonts', 'jot']);
+            const fontDir = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'share', 'fonts', 'jotite']);
             const fontDirFile = Gio.File.new_for_path(fontDir);
             
             // Create directory if it doesn't exist
@@ -2272,7 +2272,7 @@ class JotWindow extends Adw.ApplicationWindow {
     _init(application) {
         super._init({
             application,
-            title: 'Jot',
+            title: 'Jotite',
             default_width: 700,
             default_height: 500,
         });
@@ -3074,7 +3074,7 @@ class JotWindow extends Adw.ApplicationWindow {
         filter.set_name(FILE_FILTER_NAME);
         dialog.add_filter(filter);
         
-        // Set initial folder to Jot directory
+        // Set initial folder to Jotite directory
         FileManager.ensureJotDirectoryExists();
         const jotDir = FileManager.getJotDirectory();
         dialog.set_current_folder(Gio.File.new_for_path(jotDir));

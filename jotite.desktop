@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Jotite
+Comment=Jotite - A lightweight markdown note-taking app with live rendering
+Exec=jotite
+Icon=jotite
+Terminal=false
+Type=Application
+Categories=Utility;TextEditor;
+Keywords=notes;markdown;quick;capture;jotite;
