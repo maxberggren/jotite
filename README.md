@@ -1,10 +1,6 @@
 # Jotite
 
-<img src="icon.png" alt="Jotite Icon" width="64" height="64" />
-
-**Jotite** - A lightweight, distraction-free markdown note-taking app with live rendering and cursor-aware syntax hiding.
-
-![Demo Video](https://github.com/user-attachments/assets/e132e309-d115-4bd1-a965-b219b8458457)
+**Jotite** - A lightweight, fun, distraction-free markdown note-taking app with live rendering and cursor-aware syntax hiding.
 
 ## Installation
 
