@@ -23,6 +23,42 @@ sudo pacman -S gjs gtk4 libadwaita fontconfig
 yay -S jotite
 ```
 
+### Manual Installation (All Distributions)
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/maxberggren/omarchy-jotite.git
+   cd jotite
+   ```
+
+2. **Install the files:**
+   ```bash
+   # Install the main script
+   sudo install -Dm755 jotite.js /usr/local/bin/jotite
+   
+   # Install desktop entry
+   sudo install -Dm644 jotite.desktop /usr/share/applications/jotite.desktop
+   
+   # Install icon
+   sudo install -Dm644 icon.png /usr/share/pixmaps/jotite.png
+   
+   # Install custom font
+   sudo install -Dm644 pxlxxl.ttf /usr/share/fonts/TTF/pxlxxl.ttf
+   sudo fc-cache -fv
+   ```
+
+3. **Make sure dependencies are installed:**
+   
+   **Debian/Ubuntu:**
+   ```bash
+   sudo apt install gjs gir1.2-gtk-4.0 gir1.2-adw-1 fontconfig
+   ```
+   
+   **Fedora:**
+   ```bash
+   sudo dnf install gjs gtk4 libadwaita fontconfig
+   ```
+
 ## Features
 
 ### ⌨️ Keyboard Shortcuts
