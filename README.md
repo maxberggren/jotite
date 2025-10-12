@@ -20,7 +20,7 @@ sudo pacman -S gjs gtk4 libadwaita fontconfig
 ### From AUR (Arch Linux)
 
 ```bash
-yay -S jotite-git
+yay -S jotite
 ```
 
 ## Features
