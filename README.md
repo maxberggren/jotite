@@ -23,6 +23,21 @@ sudo pacman -S gjs gtk4 libadwaita fontconfig
 yay -S jotite
 ```
 
+## Features
+
+### ⌨️ Keyboard Shortcuts
+- **Ctrl+S** or **Ctrl+Enter** - Save note
+- **Ctrl+Shift+S** - Save As (choose location)
+- **Ctrl+N** - New file
+- **Ctrl+O** - Open file
+- **Ctrl+X** - Cut entire line (when no selection)
+- **Ctrl+Up/Down** - Move current line up/down
+- **Ctrl+Plus/Minus** - Zoom in/out
+- **Ctrl+0** - Reset zoom
+- **Escape** - Close application
+- **Tab/Shift+Tab** - Indent/outdent bullets
+- **Enter** - Auto-continue bullet lists
+
 ### Manual Installation (All Distributions)
 
 1. **Clone the repository:**
@@ -58,21 +73,6 @@ yay -S jotite
    ```bash
    sudo dnf install gjs gtk4 libadwaita fontconfig
    ```
-
-## Features
-
-### ⌨️ Keyboard Shortcuts
-- **Ctrl+S** or **Ctrl+Enter** - Save note
-- **Ctrl+Shift+S** - Save As (choose location)
-- **Ctrl+N** - New file
-- **Ctrl+O** - Open file
-- **Ctrl+X** - Cut entire line (when no selection)
-- **Ctrl+Up/Down** - Move current line up/down
-- **Ctrl+Plus/Minus** - Zoom in/out
-- **Ctrl+0** - Reset zoom
-- **Escape** - Close application
-- **Tab/Shift+Tab** - Indent/outdent bullets
-- **Enter** - Auto-continue bullet lists
 
 
 ## Usage
