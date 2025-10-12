@@ -2,6 +2,10 @@
 
 **Jotite** - A lightweight, fun, distraction-free markdown note-taking app with live rendering and cursor-aware syntax hiding.
 
+## Demo
+
+https://github.com/user-attachments/assets/6bb0a5ee-39ee-40ef-8ae7-403afd8ff62a
+
 ## Installation
 
 ### Dependencies
