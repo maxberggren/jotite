@@ -366,6 +366,10 @@ class ThemeManager {
                 opacity: 0.3;
                 font-size: 12px;
             }
+            
+            .status-label:hover {
+                opacity: 0.5;
+            }
 
             .status-button {
                 padding: 0px 4px;
@@ -1200,10 +1204,10 @@ class MarkdownRenderer {
                 }
                 
                 // Check for headers at line start - only when moving forward
-                const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+                const headerMatch = line.match(/^(#{1,6})(\s+)(.+)$/);
                 if (headerMatch && posInLine <= headerMatch[1].length && movingForward) {
-                    // Jump past the hashes and space
-                    return (headerMatch[1].length + 1) - posInLine;
+                    // Jump past the hashes and all spaces
+                    return (headerMatch[1].length + headerMatch[2].length) - posInLine;
                 }
                 
                 // Check for code block markers - skip over them when moving forward
@@ -1314,15 +1318,15 @@ class MarkdownRenderer {
     
     _applyLineMarkdown(line, lineOffset, lineNum) {
         // Headers (must be at start of line) - support any number of hashes
-        const headerMatch = line.match(/^(#{1,})\s+(.+)$/);
+        const headerMatch = line.match(/^(#{1,})(\s+)(.+)$/);
         if (headerMatch) {
-            const [, hashes, content] = headerMatch;
+            const [, hashes, spaces, content] = headerMatch;
             const actualLevel = hashes.length; // Actual number of hashes
             const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
             const start = this.buffer.get_iter_at_offset(lineOffset);
             
             // Hide the hashes by default (will be shown when cursor is on line)
-            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space
+            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + spaces.length);
             this._applyTag('invisible', start, hashEnd);
             
             // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
@@ -1331,7 +1335,8 @@ class MarkdownRenderer {
             const gradientColors = this.moodGradients[mood];
             
             // Apply gradient with 45-degree diagonal pattern
-            const contentStart = lineOffset + hashes.length + 1;
+            // Calculate actual content start position accounting for all spaces
+            const contentStart = lineOffset + hashes.length + spaces.length;
             for (let i = 0; i < content.length; i++) {
                 const charStart = this.buffer.get_iter_at_offset(contentStart + i);
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
@@ -1806,15 +1811,15 @@ class MarkdownRenderer {
     
     _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine, lineNum) {
         // Headers (must be at start of line) - support any number of hashes
-        const headerMatch = line.match(/^(#{1,})\s+(.+)$/);
+        const headerMatch = line.match(/^(#{1,})(\s+)(.+)$/);
         if (headerMatch) {
-            const [, hashes, content] = headerMatch;
+            const [, hashes, spaces, content] = headerMatch;
             const actualLevel = hashes.length; // Actual number of hashes
             const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
             const start = this.buffer.get_iter_at_offset(lineOffset);
             
-            // Show/hide the hashes based on cursor position
-            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space after #
+            // Show/hide the hashes and spaces based on cursor position
+            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + spaces.length);
             if (cursorOnLine) {
                 // Cursor is on this line - show hashes with level-specific dim tag
                 this._applyTag(`dim-h${styleLevel}`, start, hashEnd);
@@ -1829,7 +1834,8 @@ class MarkdownRenderer {
             const gradientColors = this.moodGradients[mood];
             
             // Apply gradient with 45-degree diagonal pattern
-            const contentStart = lineOffset + hashes.length + 1;
+            // Calculate actual content start position accounting for all spaces
+            const contentStart = lineOffset + hashes.length + spaces.length;
             for (let i = 0; i < content.length; i++) {
                 const charStart = this.buffer.get_iter_at_offset(contentStart + i);
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
@@ -2973,6 +2979,16 @@ class JotWindow extends Adw.ApplicationWindow {
             margin_start: 8,
         });
         this._pathLabel.add_css_class('status-label');
+        
+        // Set pointer cursor for path label
+        this._pathLabel.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        
+        // Make the path label clickable
+        const pathGesture = new Gtk.GestureClick();
+        pathGesture.connect('pressed', () => {
+            this._openFileLocation();
+        });
+        this._pathLabel.add_controller(pathGesture);
 
         this._statusBar.append(this._pathLabel);
 
@@ -3844,6 +3860,48 @@ Edit this FAQ.md file to add your own questions and answers!
         } catch (e) {
             print(`Error opening FAQ: ${e.message}`);
             this._showFeedback(`✗ Error opening FAQ: ${e.message}`);
+        }
+    }
+
+    _openFileLocation() {
+        try {
+            let fileToShow = null;
+            
+            if (this._currentFilePath) {
+                // If file is saved, show it in the file browser
+                fileToShow = this._currentFilePath;
+            } else {
+                // If not saved, show the Jotite directory
+                fileToShow = FileManager.getJotDirectory();
+            }
+            
+            // Try to open with file manager showing the file selected
+            // First try using dbus to call the file manager with ShowItems
+            try {
+                const file = Gio.File.new_for_path(fileToShow);
+                const uri = file.get_uri();
+                
+                // Try org.freedesktop.FileManager1 interface (works with most file managers)
+                GLib.spawn_command_line_async(`dbus-send --session --print-reply --dest=org.freedesktop.FileManager1 --type=method_call /org/freedesktop/FileManager1 org.freedesktop.FileManager1.ShowItems array:string:"${uri}" string:""`);
+                print(`Opened file location: ${fileToShow}`);
+            } catch (e) {
+                // Fallback: just open the parent directory
+                print(`DBus method failed, using fallback: ${e.message}`);
+                const file = Gio.File.new_for_path(fileToShow);
+                let dirToOpen;
+                
+                if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) === Gio.FileType.DIRECTORY) {
+                    dirToOpen = fileToShow;
+                } else {
+                    dirToOpen = GLib.path_get_dirname(fileToShow);
+                }
+                
+                GLib.spawn_command_line_async(`xdg-open "${dirToOpen}"`);
+                print(`Opened directory: ${dirToOpen}`);
+            }
+        } catch (e) {
+            print(`Error opening file location: ${e.message}`);
+            this._showFeedback(`✗ Error: ${e.message}`);
         }
     }
 });
