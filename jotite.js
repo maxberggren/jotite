@@ -32,6 +32,129 @@ const FILE_PATTERNS = ['*.md', '*.txt'];
 const FILE_FILTER_NAME = 'Text files (*.md, *.txt)';
 
 // ============================================================================
+// Settings Manager
+// ============================================================================
+
+class SettingsManager {
+    constructor() {
+        this.settings = this._loadSettings();
+        this.monitor = null;
+    }
+
+    _getSettingsPath() {
+        let appDir = null;
+        if (imports.system.programInvocationName) {
+            const invocationPath = imports.system.programInvocationName;
+            if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
+                appDir = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
+            }
+        }
+        if (!appDir) {
+            appDir = GLib.path_get_dirname(imports.system.programPath);
+        }
+        if (!appDir || appDir === '/usr/bin') {
+            appDir = GLib.get_current_dir();
+        }
+        return GLib.build_filenamev([appDir, 'settings.json']);
+    }
+
+    _getDefaultSettings() {
+        return {
+            theme: 'default',
+            fontSize: 15,
+            fontFamily: 'monospace',
+            autoSave: false,
+            headerMoods: [
+                'metal', 'cobalt', 'fire', 'forest', 'lava', 'mint', 
+                'amber', 'ocean', 'solar', 'cryo', 'stone', 'ice', 
+                'purple', 'sunset', 'royal', 'aurora', 'sunken', 'ghost', 
+                'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'ectoplasm', 
+                'polar', 'chiaroscuro', 'vanta', 'toxicvelvet', 'bruise', 
+                'bismuth', 'ultralich', 'paradox', 'hazmat', 'feral'
+            ],
+            customMoods: {
+                // Example: 'myCustomMood': ['#FF0000', '#00FF00', '#0000FF']
+            }
+        };
+    }
+
+    _loadSettings() {
+        let text = null;
+        try {
+            const settingsPath = this._getSettingsPath();
+            const file = Gio.File.new_for_path(settingsPath);
+            
+            if (!file.query_exists(null)) {
+                print('Settings file does not exist, using defaults');
+                return this._getDefaultSettings();
+            }
+
+            const [success, contents] = file.load_contents(null);
+            if (!success) {
+                print('Failed to load settings file');
+                return this._getDefaultSettings();
+            }
+
+            text = new TextDecoder().decode(contents);
+            
+            // Strip single-line comments (// comments)
+            text = text.replace(/\/\/.*$/gm, '');
+            
+            // Strip multi-line comments (/* comments */)
+            text = text.replace(/\/\*[\s\S]*?\*\//g, '');
+            
+            // Strip trailing commas before } or ]
+            text = text.replace(/,(\s*[}\]])/g, '$1');
+            
+            const settings = JSON.parse(text);
+            print(`Loaded settings: headerMoods length = ${settings.headerMoods ? settings.headerMoods.length : 'none'}`);
+            
+            // Merge with defaults to ensure all keys exist
+            const defaults = this._getDefaultSettings();
+            return Object.assign({}, defaults, settings);
+        } catch (e) {
+            print(`Error loading settings: ${e.message}`);
+            if (text) {
+                print(`Settings text was: ${text.substring(0, 200)}...`);
+            }
+            return this._getDefaultSettings();
+        }
+    }
+
+    setupMonitor(callback) {
+        try {
+            const settingsPath = this._getSettingsPath();
+            const file = Gio.File.new_for_path(settingsPath);
+            
+            this.monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
+            this.monitor.connect('changed', (monitor, file, otherFile, eventType) => {
+                print(`Settings file event: ${eventType}`);
+                // CHANGES_DONE_HINT = 0, DELETED = 1, CREATED = 2, ATTRIBUTE_CHANGED = 3, 
+                // PRE_UNMOUNT = 4, UNMOUNTED = 5, MOVED = 6, RENAMED = 7, MOVED_IN = 8, MOVED_OUT = 9
+                if (eventType === Gio.FileMonitorEvent.CHANGES_DONE_HINT || 
+                    eventType === Gio.FileMonitorEvent.CREATED ||
+                    eventType === Gio.FileMonitorEvent.ATTRIBUTE_CHANGED) {
+                    print('Settings file changed, reloading...');
+                    // Add a small delay to ensure file write is complete
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                        this.settings = this._loadSettings();
+                        callback();
+                        return false;
+                    });
+                }
+            });
+            print('Monitoring settings file for changes');
+        } catch (e) {
+            print(`Failed to setup settings monitor: ${e.message}`);
+        }
+    }
+
+    get(key) {
+        return this.settings[key];
+    }
+}
+
+// ============================================================================
 // Theme Manager
 // ============================================================================
 
@@ -244,6 +367,36 @@ class ThemeManager {
                 font-size: 12px;
             }
 
+            .status-button {
+                padding: 0px 4px;
+                margin: 0px;
+                border: none;
+                background: transparent;
+                color: ${c.white};
+                opacity: 0.3;
+                font-size: 12px;
+                font-weight: 400;
+                min-width: 0;
+                min-height: 0;
+                line-height: 1;
+            }
+
+            .status-button > * {
+                margin: 0;
+                padding: 0;
+            }
+
+            .status-button:hover {
+                opacity: 0.6;
+                background: transparent;
+            }
+
+            .status-button-large {
+                font-size: 20px;
+                line-height: 0.8;
+                padding: 0px;
+            }
+
             .jot-hash {
                 color: ${c.white};
                 font-size: ${18 * zoom}px;
@@ -408,10 +561,11 @@ class ThemeManager {
 // ============================================================================
 
 class MarkdownRenderer {
-    constructor(textView, colors) {
+    constructor(textView, colors, moodConfig = null) {
         this.textView = textView;
         this.buffer = textView.get_buffer();
         this.colors = colors;
+        this.moodConfig = moodConfig || this._getDefaultMoods();
         this.updating = false;
         this.lastCursorPosition = -1;
         this._previousCursorPosition = -1; // Track position from previous update for arrow direction
@@ -422,6 +576,45 @@ class MarkdownRenderer {
         
         this._initTags();
         this._setupSignals();
+    }
+    
+    _getDefaultMoods() {
+        return {
+            metal: { colors: ['#4A5568', '#CBD5E0'] },
+            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
+            fire: { colors: ['#FF4500', '#FFD700'] },
+            forest: { colors: ['#228B22', '#90EE90'] },
+            lava: { colors: ['#8B0000', '#FF4500'] },
+            mint: { colors: ['#00C9A7', '#C7FFED'] },
+            amber: { colors: ['#FF8C00', '#FFE4B5'] },
+            ocean: { colors: ['#006994', '#63B8FF'] },
+            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
+            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
+            stone: { colors: ['#708090', '#B0B8C0'] },
+            ice: { colors: ['#00CED1', '#E0FFFF'] },
+            purple: { colors: ['#6A0DAD', '#DA70D6'] },
+            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
+            royal: { colors: ['#4169E1', '#B0C4DE'] },
+            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
+            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
+            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
+            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
+            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
+            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
+            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
+            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
+            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
+            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
+            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
+            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
+            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
+            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
+            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
+            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
+            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
+            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
+            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
+        };
     }
     
     _lightenColor(color, percent = 10) {
@@ -560,43 +753,8 @@ class MarkdownRenderer {
             tagTable.add(tag);
         }
         
-        // Define color moods with gradient palettes (2 or 3 colors) - in custom order
-        const moods = {
-            metal: { colors: ['#4A5568', '#CBD5E0'] },
-            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
-            fire: { colors: ['#FF4500', '#FFD700'] },
-            forest: { colors: ['#228B22', '#90EE90'] },
-            lava: { colors: ['#8B0000', '#FF4500'] },
-            mint: { colors: ['#00C9A7', '#C7FFED'] },
-            amber: { colors: ['#FF8C00', '#FFE4B5'] },
-            ocean: { colors: ['#006994', '#63B8FF'] },
-            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
-            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
-            stone: { colors: ['#708090', '#B0B8C0'] },
-            ice: { colors: ['#00CED1', '#E0FFFF'] },
-            purple: { colors: ['#6A0DAD', '#DA70D6'] },
-            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
-            royal: { colors: ['#4169E1', '#B0C4DE'] },
-            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
-            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
-            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
-            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
-            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
-            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
-            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
-            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
-            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
-            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
-            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
-            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
-            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
-            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
-            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
-            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
-            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
-            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
-            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
-        };
+        // Use moods from configuration (this.moodConfig is set in constructor)
+        const moods = this.moodConfig;
         
         this.moodNames = Object.keys(moods);
         this.moodGradients = {};
@@ -2279,15 +2437,19 @@ class JotWindow extends Adw.ApplicationWindow {
 
         this._currentFilename = 'untitled.md';
         this._currentFilePath = null; // Track the full path of opened file
+        this._settingsManager = new SettingsManager();
         this._themeManager = new ThemeManager();
         this._zoomLevel = 100; // Zoom level percentage (default 100%)
         this._zoomTimeoutId = null; // Track zoom indicator timeout
         this._filenameUpdateTimeoutId = null; // Track filename update debouncing
         this._markdownRenderer = null; // Will be initialized after textview is created
         this._lineMovePending = false; // Throttle line move operations
+        this._hasUnsavedChanges = false; // Track if file has unsaved changes
+        this._savedContent = ''; // Track last saved content
 
         this._buildUI();
         this._setupTheme();
+        this._setupSettings();
         this._setupKeyboardShortcuts();
 
         // Initialize with default header with today's date
@@ -2296,6 +2458,8 @@ class JotWindow extends Adw.ApplicationWindow {
         const todayDate = now.format('%Y-%m-%d');
         const initialText = `# ${todayDate}`;
         buffer.set_text(initialText, -1);
+        this._savedContent = initialText;
+        this._hasUnsavedChanges = false;
         const iter = buffer.get_iter_at_offset(initialText.length); // Position at end
         buffer.place_cursor(iter);
         
@@ -2327,15 +2491,22 @@ class JotWindow extends Adw.ApplicationWindow {
         });
         this._textView.add_css_class('jot-textview');
 
-        // Initialize markdown renderer
+        // Initialize markdown renderer with mood config from settings
+        const moodConfig = this._getMoodConfig();
         this._markdownRenderer = new MarkdownRenderer(
             this._textView,
-            this._themeManager.colors
+            this._themeManager.colors,
+            moodConfig
         );
 
         // Connect to buffer changes to update filename with debouncing (200ms delay)
         const buffer = this._textView.get_buffer();
         buffer.connect('changed', () => {
+            // Mark as having unsaved changes
+            const [start, end] = buffer.get_bounds();
+            const currentContent = buffer.get_text(start, end, false);
+            this._hasUnsavedChanges = (currentContent !== this._savedContent);
+            
             // Cancel previous timeout if exists
             if (this._filenameUpdateTimeoutId) {
                 GLib.source_remove(this._filenameUpdateTimeoutId);
@@ -2805,6 +2976,41 @@ class JotWindow extends Adw.ApplicationWindow {
 
         this._statusBar.append(this._pathLabel);
 
+        // Add right-side buttons
+        const rightBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 4,
+            halign: Gtk.Align.END,
+            margin_end: 8,
+        });
+
+        // FAQ button (question mark)
+        const faqButton = new Gtk.Button({
+            label: '?',
+            tooltip_text: 'Open FAQ',
+            halign: Gtk.Align.CENTER,
+            valign: Gtk.Align.CENTER,
+        });
+        faqButton.add_css_class('status-button');
+        faqButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        faqButton.connect('clicked', () => this._openFAQ());
+
+        // Settings button (cog/gear)
+        const settingsButton = new Gtk.Button({
+            label: '⚙',
+            tooltip_text: 'Open Settings',
+            halign: Gtk.Align.CENTER,
+            valign: Gtk.Align.CENTER,
+        });
+        settingsButton.add_css_class('status-button');
+        settingsButton.add_css_class('status-button-large');
+        settingsButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        settingsButton.connect('clicked', () => this._openSettings());
+
+        rightBox.append(faqButton);
+        rightBox.append(settingsButton);
+        this._statusBar.append(rightBox);
+
         return this._statusBar;
     }
 
@@ -2908,6 +3114,100 @@ class JotWindow extends Adw.ApplicationWindow {
         }
         print('Theme reload complete');
     }
+    
+    _setupSettings() {
+        // Setup settings file monitor
+        this._settingsManager.setupMonitor(() => {
+            print('Settings changed, reloading...');
+            this._applySettings();
+        });
+    }
+    
+    _getDefaultMoodsStatic() {
+        return {
+            metal: { colors: ['#4A5568', '#CBD5E0'] },
+            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
+            fire: { colors: ['#FF4500', '#FFD700'] },
+            forest: { colors: ['#228B22', '#90EE90'] },
+            lava: { colors: ['#8B0000', '#FF4500'] },
+            mint: { colors: ['#00C9A7', '#C7FFED'] },
+            amber: { colors: ['#FF8C00', '#FFE4B5'] },
+            ocean: { colors: ['#006994', '#63B8FF'] },
+            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
+            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
+            stone: { colors: ['#708090', '#B0B8C0'] },
+            ice: { colors: ['#00CED1', '#E0FFFF'] },
+            purple: { colors: ['#6A0DAD', '#DA70D6'] },
+            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
+            royal: { colors: ['#4169E1', '#B0C4DE'] },
+            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
+            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
+            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
+            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
+            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
+            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
+            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
+            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
+            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
+            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
+            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
+            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
+            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
+            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
+            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
+            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
+            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
+            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
+            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
+        };
+    }
+    
+    _getMoodConfig() {
+        // Build mood configuration from settings
+        const defaultMoods = this._getDefaultMoodsStatic();
+        const headerMoods = this._settingsManager.get('headerMoods') || Object.keys(defaultMoods);
+        const customMoods = this._settingsManager.get('customMoods') || {};
+        
+        print(`Getting mood config: headerMoods = ${JSON.stringify(headerMoods.slice(0, 5))}...`);
+        
+        // Filter out example/comment entries from customMoods
+        const filteredCustomMoods = {};
+        for (const [key, value] of Object.entries(customMoods)) {
+            if (!key.startsWith('_') && Array.isArray(value)) {
+                filteredCustomMoods[key] = { colors: value };
+                print(`Added custom mood: ${key}`);
+            }
+        }
+        
+        // Merge default moods with custom moods
+        const allMoods = Object.assign({}, defaultMoods, filteredCustomMoods);
+        
+        // Filter to only include moods listed in headerMoods
+        const moodConfig = {};
+        for (const moodName of headerMoods) {
+            if (allMoods[moodName]) {
+                moodConfig[moodName] = allMoods[moodName];
+            }
+        }
+        
+        print(`Final mood config has ${Object.keys(moodConfig).length} moods: ${Object.keys(moodConfig).slice(0, 5).join(', ')}...`);
+        
+        return moodConfig;
+    }
+    
+    _applySettings() {
+        // Reload settings and apply to renderer
+        if (this._markdownRenderer) {
+            const moodConfig = this._getMoodConfig();
+            this.moodConfig = moodConfig;
+            
+            // Update moods and force a complete re-render with cursor context
+            this._markdownRenderer.moodConfig = moodConfig;
+            this._markdownRenderer._initTags();
+            this._markdownRenderer._updateSyntaxVisibility();
+        }
+        // Can add more settings application here (fontSize, fontFamily, etc.)
+    }
 
     _applyCSS() {
         // Remove old CSS provider if it exists
@@ -2991,8 +3291,10 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _updateFilenameDisplay() {
-        // If a file is already opened, don't change the path
+        // If a file is already opened, update the label but don't change filename
         if (this._currentFilePath) {
+            const prefix = this._hasUnsavedChanges ? '● ' : '';
+            this._pathLabel.set_label(prefix + this._currentFilePath);
             return;
         }
 
@@ -3000,7 +3302,9 @@ class JotWindow extends Adw.ApplicationWindow {
         this._currentFilename = FileManager.generateFilename(title);
 
         const jotDir = FileManager.getJotDirectory();
-        this._pathLabel.set_label(GLib.build_filenamev([jotDir, this._currentFilename]));
+        const fullPath = GLib.build_filenamev([jotDir, this._currentFilename]);
+        const prefix = this._hasUnsavedChanges ? '● ' : '';
+        this._pathLabel.set_label(prefix + fullPath);
     }
 
     _newFile() {
@@ -3014,6 +3318,10 @@ class JotWindow extends Adw.ApplicationWindow {
         const todayDate = now.format('%Y-%m-%d');
         const initialText = `# ${todayDate}`;
         buffer.set_text(initialText, -1);
+        
+        // Reset saved content tracking
+        this._savedContent = initialText;
+        this._hasUnsavedChanges = false;
         
         // Position cursor at the end
         const iter = buffer.get_iter_at_offset(initialText.length);
@@ -3107,6 +3415,8 @@ class JotWindow extends Adw.ApplicationWindow {
             // Update current file info
             this._currentFilePath = file.get_path();
             this._currentFilename = file.get_basename();
+            this._savedContent = content;
+            this._hasUnsavedChanges = false;
             this._pathLabel.set_label(this._currentFilePath);
             
             print(`Note saved to ${this._currentFilePath}`);
@@ -3389,11 +3699,151 @@ class JotWindow extends Adw.ApplicationWindow {
 
             this._currentFilename = file.get_basename();
             this._currentFilePath = file.get_path();
+            this._savedContent = text;
+            this._hasUnsavedChanges = false;
             this._pathLabel.set_label(this._currentFilePath);
 
             print(`Loaded file: ${this._currentFilePath}`);
         } catch (e) {
             print(`Error loading file: ${e.message}`);
+        }
+    }
+
+    _openSettings() {
+        try {
+            // Get the application directory
+            let appDir = null;
+            if (imports.system.programInvocationName) {
+                const invocationPath = imports.system.programInvocationName;
+                if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
+                    appDir = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
+                }
+            }
+            if (!appDir) {
+                appDir = GLib.path_get_dirname(imports.system.programPath);
+            }
+            if (!appDir || appDir === '/usr/bin') {
+                appDir = GLib.get_current_dir();
+            }
+            
+            const settingsPath = GLib.build_filenamev([appDir, 'settings.json']);
+            const settingsFile = Gio.File.new_for_path(settingsPath);
+            
+            // Create default settings file if it doesn't exist
+            if (!settingsFile.query_exists(null)) {
+                const defaultSettings = JSON.stringify({
+                    _comment: "Jotite Settings - Changes to this file are applied immediately",
+                    theme: 'default',
+                    fontSize: 15,
+                    fontFamily: 'monospace',
+                    autoSave: false,
+                    headerMoods: [
+                        "metal", "cobalt", "fire", "forest", "lava", "mint",
+                        "amber", "ocean", "solar", "cryo", "stone", "ice",
+                        "purple", "sunset", "royal", "aurora", "sunken", "ghost",
+                        "sulfur", "velvet", "cicada", "lunar", "tonic", "ectoplasm",
+                        "polar", "chiaroscuro", "vanta", "toxicvelvet", "bruise",
+                        "bismuth", "ultralich", "paradox", "hazmat", "feral"
+                    ],
+                    _headerMoodsComment: "Header moods determine the color gradient for each heading level. # uses the first mood, ## uses the second, etc. Reorder this array to customize which colors appear for each heading level.",
+                    customMoods: {
+                        _example: "Add your own custom mood gradients here. Example format below:",
+                        _exampleMood: ["#FF0000", "#00FF00", "#0000FF"]
+                    },
+                    _customMoodsComment: "Custom moods can have 2 or 3 colors for the gradient. Add them here and reference them in headerMoods array."
+                }, null, 2);
+                
+                settingsFile.replace_contents(defaultSettings, null, false, 
+                    Gio.FileCreateFlags.NONE, null);
+                print('Created default settings.json');
+            }
+            
+            // Open in a new window
+            this.application.vfunc_open([settingsFile], '');
+        } catch (e) {
+            print(`Error opening settings: ${e.message}`);
+            this._showFeedback(`✗ Error opening settings: ${e.message}`);
+        }
+    }
+
+    _openFAQ() {
+        try {
+            // Get the application directory
+            let appDir = null;
+            if (imports.system.programInvocationName) {
+                const invocationPath = imports.system.programInvocationName;
+                if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
+                    appDir = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
+                }
+            }
+            if (!appDir) {
+                appDir = GLib.path_get_dirname(imports.system.programPath);
+            }
+            if (!appDir || appDir === '/usr/bin') {
+                appDir = GLib.get_current_dir();
+            }
+            
+            const faqPath = GLib.build_filenamev([appDir, 'FAQ.md']);
+            const faqFile = Gio.File.new_for_path(faqPath);
+            
+            // Create default FAQ file if it doesn't exist
+            if (!faqFile.query_exists(null)) {
+                const defaultFAQ = `# Jotite FAQ
+
+## What is Jotite?
+
+Jotite is a minimalist markdown note-taking application with live rendering.
+
+## Keyboard Shortcuts
+
+- **Ctrl+S** or **Ctrl+Enter**: Save note
+- **Ctrl+Shift+S**: Save As
+- **Ctrl+N**: New note
+- **Ctrl+O**: Open note
+- **Ctrl+Plus**: Zoom in
+- **Ctrl+Minus**: Zoom out
+- **Ctrl+0**: Reset zoom
+- **Ctrl+X**: Cut line (when no selection)
+- **Ctrl+Up/Down**: Move line up/down
+- **Tab**: Indent bullet point
+- **Shift+Tab**: Outdent bullet point
+
+## Markdown Syntax
+
+- **Headers**: # H1, ## H2, ### H3, etc.
+- **Bold**: **text** or __text__
+- **Italic**: *text* or _text_
+- **Code**: \`code\`
+- **Code block**: \`\`\`code\`\`\`
+- **Strikethrough**: ~~text~~
+- **Underline**: ++text++
+- **Links**: [text](url)
+- **Bullets**: - item or * item
+- **Todos**: [ ] unchecked or [X] checked
+
+## Where are my notes saved?
+
+Notes are saved in: ~/Documents/Jotite/
+
+## How do I customize the theme?
+
+Jotite follows the Alacritty theme at: ~/.config/omarchy/current/theme/alacritty.toml
+
+## Questions?
+
+Edit this FAQ.md file to add your own questions and answers!
+`;
+                
+                faqFile.replace_contents(defaultFAQ, null, false, 
+                    Gio.FileCreateFlags.NONE, null);
+                print('Created default FAQ.md');
+            }
+            
+            // Open in a new window
+            this.application.vfunc_open([faqFile], '');
+        } catch (e) {
+            print(`Error opening FAQ: ${e.message}`);
+            this._showFeedback(`✗ Error opening FAQ: ${e.message}`);
         }
     }
 });
