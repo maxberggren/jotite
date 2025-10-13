@@ -2290,15 +2290,10 @@ class JotWindow extends Adw.ApplicationWindow {
         this._setupTheme();
         this._setupKeyboardShortcuts();
 
-        // Initialize with default header with today's date
-        const buffer = this._textView.get_buffer();
-        const now = GLib.DateTime.new_now_local();
-        const todayDate = now.format('%Y-%m-%d');
-        const initialText = `# ${todayDate}`;
-        buffer.set_text(initialText, -1);
-        const iter = buffer.get_iter_at_offset(initialText.length); // Position at end
-        buffer.place_cursor(iter);
-        
+        if (!this._loadExistingDefaultNote()) {
+            this._newFile();
+        }
+
         this._textView.grab_focus();
     }
 
@@ -3001,6 +2996,27 @@ class JotWindow extends Adw.ApplicationWindow {
 
         const jotDir = FileManager.getJotDirectory();
         this._pathLabel.set_label(GLib.build_filenamev([jotDir, this._currentFilename]));
+    }
+
+    _loadExistingDefaultNote() {
+        try {
+            FileManager.ensureJotDirectoryExists();
+            const jotDir = FileManager.getJotDirectory();
+            const now = GLib.DateTime.new_now_local();
+            const todayDate = now.format('%Y-%m-%d');
+            const targetFilename = FileManager.generateFilename(todayDate);
+            const targetPath = GLib.build_filenamev([jotDir, targetFilename]);
+            const file = Gio.File.new_for_path(targetPath);
+
+            if (file.query_exists(null)) {
+                this.loadFile(file);
+                return true;
+            }
+        } catch (e) {
+            print(`Error loading default note: ${e.message}`);
+        }
+
+        return false;
     }
 
     _newFile() {
