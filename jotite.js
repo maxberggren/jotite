@@ -3578,49 +3578,92 @@ class JotWindow extends Adw.ApplicationWindow {
         this._lineMovePending = true;
         
         const buffer = this._textView.get_buffer();
-        const cursor = buffer.get_insert();
-        const iter = buffer.get_iter_at_mark(cursor);
-        const currentLineNum = iter.get_line();
         
-        // Can't move the first line up
-        if (currentLineNum === 0) {
+        // Get all text and split into lines
+        const [bufStart, bufEnd] = buffer.get_bounds();
+        const allText = buffer.get_text(bufStart, bufEnd, false);
+        const lines = allText.split('\n');
+        
+        // Check if there's a selection
+        const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+        
+        let firstLineNum, lastLineNum, cursorOffset, wasSelection;
+        
+        if (hasSelection) {
+            // Get the line numbers of the selection bounds
+            firstLineNum = selStart.get_line();
+            lastLineNum = selEnd.get_line();
+            
+            // If selection end is at the start of a line (offset 0), don't include that line
+            if (selEnd.get_line_offset() === 0 && lastLineNum > firstLineNum) {
+                lastLineNum--;
+            }
+            
+            wasSelection = true;
+        } else {
+            // No selection, just move current line
+            const cursor = buffer.get_insert();
+            const iter = buffer.get_iter_at_mark(cursor);
+            firstLineNum = iter.get_line();
+            lastLineNum = firstLineNum;
+            cursorOffset = iter.get_line_offset();
+            wasSelection = false;
+        }
+        
+        // Can't move if first line is already at the top
+        if (firstLineNum === 0) {
             this._lineMovePending = false;
             return;
         }
         
-        // Calculate cursor position within the line
-        const cursorOffset = iter.get_line_offset();
+        // Get the line above
+        const targetLineNum = firstLineNum - 1;
+        const targetLineText = lines[targetLineNum];
         
-        // Get all text and split into lines
-        const [start, end] = buffer.get_bounds();
-        const allText = buffer.get_text(start, end, false);
-        const lines = allText.split('\n');
+        // Get selected lines
+        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
         
-        const currentLineText = lines[currentLineNum];
-        const prevLineText = lines[currentLineNum - 1];
-        
-        // Calculate byte offsets for the two lines
-        let prevLineStart = 0;
-        for (let i = 0; i < currentLineNum - 1; i++) {
-            prevLineStart += lines[i].length + 1; // +1 for newline
+        // Calculate byte offset where target line starts
+        let targetLineStart = 0;
+        for (let i = 0; i < targetLineNum; i++) {
+            targetLineStart += lines[i].length + 1; // +1 for newline
         }
-        const currentLineStart = prevLineStart + prevLineText.length + 1;
-        const currentLineEnd = currentLineStart + currentLineText.length;
         
-        // Delete both lines and replace with swapped version
-        const deleteStart = buffer.get_iter_at_offset(prevLineStart);
-        const deleteEnd = buffer.get_iter_at_offset(currentLineEnd);
+        // Calculate byte offset where selection ends
+        let selectionEnd = targetLineStart + targetLineText.length + 1;
+        for (let i = firstLineNum; i <= lastLineNum; i++) {
+            selectionEnd += lines[i].length + (i < lastLineNum ? 1 : 0);
+        }
+        
+        // Delete the target line and selected lines, then reinsert in swapped order
+        const deleteStart = buffer.get_iter_at_offset(targetLineStart);
+        const deleteEnd = buffer.get_iter_at_offset(selectionEnd);
         
         buffer.begin_user_action();
         buffer.delete(deleteStart, deleteEnd);
         
-        const insertIter = buffer.get_iter_at_offset(prevLineStart);
-        buffer.insert(insertIter, `${currentLineText}\n${prevLineText}`, -1);
+        const insertIter = buffer.get_iter_at_offset(targetLineStart);
+        const newText = selectedLines.join('\n') + '\n' + targetLineText;
+        buffer.insert(insertIter, newText, -1);
         
-        // Move cursor to the new position (one line up, same offset)
-        const newCursorOffset = prevLineStart + Math.min(cursorOffset, currentLineText.length);
-        const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
-        buffer.place_cursor(newCursorIter);
+        if (wasSelection) {
+            // Restore selection on the moved lines
+            const newFirstLineStart = targetLineStart;
+            let newLastLineEnd = newFirstLineStart;
+            for (let i = 0; i < selectedLines.length; i++) {
+                newLastLineEnd += selectedLines[i].length + (i < selectedLines.length - 1 ? 1 : 0);
+            }
+            
+            const newSelStart = buffer.get_iter_at_offset(newFirstLineStart);
+            const newSelEnd = buffer.get_iter_at_offset(newLastLineEnd);
+            buffer.select_range(newSelStart, newSelEnd);
+        } else {
+            // Move cursor to the new position (one line up, same offset)
+            const firstLineText = selectedLines[0];
+            const newCursorOffset = targetLineStart + Math.min(cursorOffset, firstLineText.length);
+            const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
+            buffer.place_cursor(newCursorIter);
+        }
         
         buffer.end_user_action();
         
@@ -3658,50 +3701,93 @@ class JotWindow extends Adw.ApplicationWindow {
         this._lineMovePending = true;
         
         const buffer = this._textView.get_buffer();
-        const cursor = buffer.get_insert();
-        const iter = buffer.get_iter_at_mark(cursor);
-        const currentLineNum = iter.get_line();
-        
-        // Calculate cursor position within the line
-        const cursorOffset = iter.get_line_offset();
         
         // Get all text and split into lines
-        const [start, end] = buffer.get_bounds();
-        const allText = buffer.get_text(start, end, false);
+        const [bufStart, bufEnd] = buffer.get_bounds();
+        const allText = buffer.get_text(bufStart, bufEnd, false);
         const lines = allText.split('\n');
         
-        // Can't move the last line down
-        if (currentLineNum >= lines.length - 1) {
+        // Check if there's a selection
+        const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+        
+        let firstLineNum, lastLineNum, cursorOffset, wasSelection;
+        
+        if (hasSelection) {
+            // Get the line numbers of the selection bounds
+            firstLineNum = selStart.get_line();
+            lastLineNum = selEnd.get_line();
+            
+            // If selection end is at the start of a line (offset 0), don't include that line
+            if (selEnd.get_line_offset() === 0 && lastLineNum > firstLineNum) {
+                lastLineNum--;
+            }
+            
+            wasSelection = true;
+        } else {
+            // No selection, just move current line
+            const cursor = buffer.get_insert();
+            const iter = buffer.get_iter_at_mark(cursor);
+            firstLineNum = iter.get_line();
+            lastLineNum = firstLineNum;
+            cursorOffset = iter.get_line_offset();
+            wasSelection = false;
+        }
+        
+        // Can't move if last line is already at the bottom
+        if (lastLineNum >= lines.length - 1) {
             this._lineMovePending = false;
             return;
         }
         
-        const currentLineText = lines[currentLineNum];
-        const nextLineText = lines[currentLineNum + 1];
+        // Get the line below
+        const targetLineNum = lastLineNum + 1;
+        const targetLineText = lines[targetLineNum];
         
-        // Calculate byte offsets for the two lines
-        let currentLineStart = 0;
-        for (let i = 0; i < currentLineNum; i++) {
-            currentLineStart += lines[i].length + 1; // +1 for newline
+        // Get selected lines
+        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
+        
+        // Calculate byte offset where first selected line starts
+        let firstLineStart = 0;
+        for (let i = 0; i < firstLineNum; i++) {
+            firstLineStart += lines[i].length + 1; // +1 for newline
         }
-        const nextLineStart = currentLineStart + currentLineText.length + 1;
-        const nextLineEnd = nextLineStart + nextLineText.length;
         
-        // Delete both lines and replace with swapped version
-        const deleteStart = buffer.get_iter_at_offset(currentLineStart);
-        const deleteEnd = buffer.get_iter_at_offset(nextLineEnd);
+        // Calculate byte offset where target line ends
+        let targetLineEnd = firstLineStart;
+        for (let i = firstLineNum; i <= lastLineNum; i++) {
+            targetLineEnd += lines[i].length + 1;
+        }
+        targetLineEnd += targetLineText.length;
+        
+        // Delete the selected lines and target line, then reinsert in swapped order
+        const deleteStart = buffer.get_iter_at_offset(firstLineStart);
+        const deleteEnd = buffer.get_iter_at_offset(targetLineEnd);
         
         buffer.begin_user_action();
         buffer.delete(deleteStart, deleteEnd);
         
-        const insertIter = buffer.get_iter_at_offset(currentLineStart);
-        buffer.insert(insertIter, `${nextLineText}\n${currentLineText}`, -1);
+        const insertIter = buffer.get_iter_at_offset(firstLineStart);
+        const newText = targetLineText + '\n' + selectedLines.join('\n');
+        buffer.insert(insertIter, newText, -1);
         
-        // Move cursor to the new position (one line down, same offset)
-        // The current line is now after the next line, so add next line length + 1 for newline
-        const newCursorOffset = currentLineStart + nextLineText.length + 1 + Math.min(cursorOffset, currentLineText.length);
-        const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
-        buffer.place_cursor(newCursorIter);
+        if (wasSelection) {
+            // Restore selection on the moved lines (now one line down)
+            const newFirstLineStart = firstLineStart + targetLineText.length + 1;
+            let newLastLineEnd = newFirstLineStart;
+            for (let i = 0; i < selectedLines.length; i++) {
+                newLastLineEnd += selectedLines[i].length + (i < selectedLines.length - 1 ? 1 : 0);
+            }
+            
+            const newSelStart = buffer.get_iter_at_offset(newFirstLineStart);
+            const newSelEnd = buffer.get_iter_at_offset(newLastLineEnd);
+            buffer.select_range(newSelStart, newSelEnd);
+        } else {
+            // Move cursor to the new position (one line down, same offset)
+            const firstLineText = selectedLines[0];
+            const newCursorOffset = firstLineStart + targetLineText.length + 1 + Math.min(cursorOffset, firstLineText.length);
+            const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
+            buffer.place_cursor(newCursorIter);
+        }
         
         buffer.end_user_action();
         
