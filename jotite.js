@@ -2301,13 +2301,33 @@ class MarkdownRenderer {
 // ============================================================================
 
 class FileManager {
-    static getJotDirectory() {
+    static getJotDirectory(settingsManager = null) {
         const homeDir = GLib.get_home_dir();
+        
+        // Try to get path from settings
+        if (settingsManager) {
+            const notesPath = settingsManager.get('notesPath');
+            if (notesPath) {
+                // Handle ~ expansion
+                let expandedPath = notesPath;
+                if (expandedPath.startsWith('~/')) {
+                    expandedPath = GLib.build_filenamev([homeDir, expandedPath.substring(2)]);
+                } else if (expandedPath === '~') {
+                    expandedPath = homeDir;
+                } else if (!expandedPath.startsWith('/')) {
+                    // Relative path - make it relative to home
+                    expandedPath = GLib.build_filenamev([homeDir, expandedPath]);
+                }
+                return expandedPath;
+            }
+        }
+        
+        // Fall back to default
         return GLib.build_filenamev([homeDir, ...JOT_DIR]);
     }
 
-    static ensureJotDirectoryExists() {
-        const jotDir = this.getJotDirectory();
+    static ensureJotDirectoryExists(settingsManager = null) {
+        const jotDir = this.getJotDirectory(settingsManager);
         const jotDirFile = Gio.File.new_for_path(jotDir);
 
         try {
@@ -3011,7 +3031,7 @@ class JotWindow extends Adw.ApplicationWindow {
         });
         this._statusBar.add_css_class('jot-statusbar');
 
-        const jotDir = FileManager.getJotDirectory();
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
         this._pathLabel = new Gtk.Label({
             label: GLib.build_filenamev([jotDir, this._currentFilename]),
             halign: Gtk.Align.START,
@@ -3359,7 +3379,7 @@ class JotWindow extends Adw.ApplicationWindow {
         const title = this._extractTitleFromContent();
         this._currentFilename = FileManager.generateFilename(title);
 
-        const jotDir = FileManager.getJotDirectory();
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
         const fullPath = GLib.build_filenamev([jotDir, this._currentFilename]);
         const prefix = this._hasUnsavedChanges ? '● ' : '';
         this._pathLabel.set_label(prefix + fullPath);
@@ -3442,8 +3462,8 @@ class JotWindow extends Adw.ApplicationWindow {
         dialog.add_filter(filter);
         
         // Set initial folder to Jotite directory
-        FileManager.ensureJotDirectoryExists();
-        const jotDir = FileManager.getJotDirectory();
+        FileManager.ensureJotDirectoryExists(this._settingsManager);
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
         dialog.set_current_folder(Gio.File.new_for_path(jotDir));
         
         // Suggest a filename
@@ -3498,7 +3518,7 @@ class JotWindow extends Adw.ApplicationWindow {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, FEEDBACK_TIMEOUT_MS, () => {
             // Restore to actual path, not captured label
             const actualPath = this._currentFilePath || 
-                               GLib.build_filenamev([FileManager.getJotDirectory(), this._currentFilename]);
+                               GLib.build_filenamev([FileManager.getJotDirectory(this._settingsManager), this._currentFilename]);
             this._pathLabel.set_label(actualPath);
             return false;
         });
@@ -3548,7 +3568,7 @@ class JotWindow extends Adw.ApplicationWindow {
         this._zoomTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
             // Get the actual current path to restore
             const actualPath = this._currentFilePath || 
-                               GLib.build_filenamev([FileManager.getJotDirectory(), this._currentFilename]);
+                               GLib.build_filenamev([FileManager.getJotDirectory(this._settingsManager), this._currentFilename]);
             this._pathLabel.set_label(actualPath);
             this._zoomTimeoutId = null;
             return false;
@@ -3813,7 +3833,7 @@ class JotWindow extends Adw.ApplicationWindow {
         filters.append(filter);
         dialog.set_filters(filters);
 
-        const jotDir = FileManager.getJotDirectory();
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
         const jotFile = Gio.File.new_for_path(jotDir);
         dialog.set_initial_folder(jotFile);
 
@@ -3940,7 +3960,9 @@ Jotite is a minimalist markdown note-taking application with live rendering.
 
 ## Where are my notes saved?
 
-Notes are saved in: ~/Documents/Jotite/
+By default, notes are saved in: ~/Documents/Jotite/
+
+You can change this location by editing the settings.json file (click the ⚙ icon) and modifying the "notesPath" setting.
 
 ## How do I customize the theme?
 
@@ -3973,7 +3995,7 @@ Edit this FAQ.md file to add your own questions and answers!
                 fileToShow = this._currentFilePath;
             } else {
                 // If not saved, show the Jotite directory
-                fileToShow = FileManager.getJotDirectory();
+                fileToShow = FileManager.getJotDirectory(this._settingsManager);
             }
             
             // Try to open with file manager showing the file selected
