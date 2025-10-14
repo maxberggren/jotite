@@ -13,6 +13,7 @@ const FEEDBACK_TIMEOUT_MS = 3000;
 
 // Keyboard constants
 const KEY_ENTER = 65293;
+const KEY_KP_ENTER = 65421;  // Numpad Enter key
 const KEY_S = 115;
 const KEY_S_UPPER = 83;  // 'S' key (with shift)
 const KEY_N = 110;       // 'n' key
@@ -2600,8 +2601,8 @@ class JotWindow extends Adw.ApplicationWindow {
                 lineStartOffset = offset;
             }
             
-            // Handle Enter key (65293)
-            if (keyval === 65293 && !(state & CTRL_MASK)) {
+            // Handle Enter key and Numpad Enter
+            if ((keyval === KEY_ENTER || keyval === KEY_KP_ENTER) && !(state & CTRL_MASK)) {
                 print('Enter key detected on bullet list handler');
                 const bulletMatch = lineText.match(/^(\s*)([-*])\s+(.*)$/);
                 if (bulletMatch) {
