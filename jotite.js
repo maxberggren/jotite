@@ -42,8 +42,10 @@ class SettingsManager {
         this.monitor = null;
     }
 
-    _getSettingsPath() {
+    _getAppDirectory() {
+        // Try to find the application directory (where the script is installed)
         let appDir = null;
+        
         if (imports.system.programInvocationName) {
             const invocationPath = imports.system.programInvocationName;
             if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
@@ -53,10 +55,63 @@ class SettingsManager {
         if (!appDir) {
             appDir = GLib.path_get_dirname(imports.system.programPath);
         }
-        if (!appDir || appDir === '/usr/bin') {
-            appDir = GLib.get_current_dir();
+        
+        // If installed to /usr/bin or /usr/local/bin, look for data files in /usr/share/jotite
+        if (appDir === '/usr/bin' || appDir === '/usr/local/bin') {
+            const systemDataDir = appDir === '/usr/bin' ? '/usr/share/jotite' : '/usr/local/share/jotite';
+            const systemDataDirFile = Gio.File.new_for_path(systemDataDir);
+            if (systemDataDirFile.query_exists(null)) {
+                return systemDataDir;
+            }
         }
-        return GLib.build_filenamev([appDir, 'settings.json']);
+        
+        return appDir;
+    }
+
+    _ensureConfigDirectory() {
+        const configDir = GLib.build_filenamev([GLib.get_home_dir(), '.config', 'jotite']);
+        const configDirFile = Gio.File.new_for_path(configDir);
+        
+        if (!configDirFile.query_exists(null)) {
+            try {
+                configDirFile.make_directory_with_parents(null);
+                print(`Created config directory: ${configDir}`);
+                
+                // Copy default files from app directory
+                const appDir = this._getAppDirectory();
+                
+                // Copy settings.json
+                const srcSettingsPath = GLib.build_filenamev([appDir, 'settings.json']);
+                const srcSettingsFile = Gio.File.new_for_path(srcSettingsPath);
+                const dstSettingsPath = GLib.build_filenamev([configDir, 'settings.json']);
+                const dstSettingsFile = Gio.File.new_for_path(dstSettingsPath);
+                
+                if (srcSettingsFile.query_exists(null)) {
+                    srcSettingsFile.copy(dstSettingsFile, Gio.FileCopyFlags.NONE, null, null);
+                    print(`Copied settings.json from ${srcSettingsPath}`);
+                }
+                
+                // Copy FAQ.md
+                const srcFaqPath = GLib.build_filenamev([appDir, 'FAQ.md']);
+                const srcFaqFile = Gio.File.new_for_path(srcFaqPath);
+                const dstFaqPath = GLib.build_filenamev([configDir, 'FAQ.md']);
+                const dstFaqFile = Gio.File.new_for_path(dstFaqPath);
+                
+                if (srcFaqFile.query_exists(null)) {
+                    srcFaqFile.copy(dstFaqFile, Gio.FileCopyFlags.NONE, null, null);
+                    print(`Copied FAQ.md from ${srcFaqPath}`);
+                }
+            } catch (e) {
+                print(`Warning: Error setting up config directory: ${e.message}`);
+            }
+        }
+        
+        return configDir;
+    }
+
+    _getSettingsPath() {
+        const configDir = this._ensureConfigDirectory();
+        return GLib.build_filenamev([configDir, 'settings.json']);
     }
 
     _getDefaultSettings() {
@@ -3312,6 +3367,7 @@ class JotWindow extends Adw.ApplicationWindow {
         if (this._currentFilePath) {
             const prefix = this._hasUnsavedChanges ? '● ' : '';
             this._pathLabel.set_label(prefix + this._currentFilePath);
+            this._pathLabel.set_tooltip_text(this._hasUnsavedChanges ? 'File not saved' : this._currentFilePath);
             return;
         }
 
@@ -3322,6 +3378,7 @@ class JotWindow extends Adw.ApplicationWindow {
         const fullPath = GLib.build_filenamev([jotDir, this._currentFilename]);
         const prefix = this._hasUnsavedChanges ? '● ' : '';
         this._pathLabel.set_label(prefix + fullPath);
+        this._pathLabel.set_tooltip_text(this._hasUnsavedChanges ? 'File not saved' : fullPath);
     }
 
     _newFile() {
@@ -3728,22 +3785,8 @@ class JotWindow extends Adw.ApplicationWindow {
 
     _openSettings() {
         try {
-            // Get the application directory
-            let appDir = null;
-            if (imports.system.programInvocationName) {
-                const invocationPath = imports.system.programInvocationName;
-                if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
-                    appDir = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
-                }
-            }
-            if (!appDir) {
-                appDir = GLib.path_get_dirname(imports.system.programPath);
-            }
-            if (!appDir || appDir === '/usr/bin') {
-                appDir = GLib.get_current_dir();
-            }
-            
-            const settingsPath = GLib.build_filenamev([appDir, 'settings.json']);
+            const configDir = this._settingsManager._ensureConfigDirectory();
+            const settingsPath = GLib.build_filenamev([configDir, 'settings.json']);
             const settingsFile = Gio.File.new_for_path(settingsPath);
             
             // Create default settings file if it doesn't exist
@@ -3785,22 +3828,8 @@ class JotWindow extends Adw.ApplicationWindow {
 
     _openFAQ() {
         try {
-            // Get the application directory
-            let appDir = null;
-            if (imports.system.programInvocationName) {
-                const invocationPath = imports.system.programInvocationName;
-                if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
-                    appDir = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
-                }
-            }
-            if (!appDir) {
-                appDir = GLib.path_get_dirname(imports.system.programPath);
-            }
-            if (!appDir || appDir === '/usr/bin') {
-                appDir = GLib.get_current_dir();
-            }
-            
-            const faqPath = GLib.build_filenamev([appDir, 'FAQ.md']);
+            const configDir = this._settingsManager._ensureConfigDirectory();
+            const faqPath = GLib.build_filenamev([configDir, 'FAQ.md']);
             const faqFile = Gio.File.new_for_path(faqPath);
             
             // Create default FAQ file if it doesn't exist
@@ -3913,3 +3942,4 @@ Edit this FAQ.md file to add your own questions and answers!
 
 const app = new JotApplication();
 app.run([imports.system.programInvocationName].concat(ARGV));
+
