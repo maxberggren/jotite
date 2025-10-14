@@ -9,7 +9,7 @@ license=('MIT')
 depends=('gjs' 'gtk4' 'libadwaita' 'fontconfig')
 install=jotite.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('f25a011ba62e3d0df808c4cb0d5f346f98a26d31172857db4d9b93c658e57ac2')
+sha256sums=('21b276535b8191ce26078908821674726cc17dabd5dc0610e6f6b8b61b807f4a')
 
 package() {
     cd "$srcdir/omarchy-jotite-$pkgver"

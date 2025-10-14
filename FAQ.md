@@ -31,11 +31,13 @@ You can create your own color gradients in the `customMoods` section:
 
 ```json
 "customMoods": {
-  "myMood": ["#FF0000", "#00FF00", "#0000FF"]
+  "solidRed": ["#FF0000"],
+  "redBlue": ["#FF0000", "#0000FF"],
+  "rainbow": ["#FF0000", "#FFFF00", "#00FF00", "#0000FF", "#FF00FF"]
 }
 ```
 
-Then add `"myMood"` to the `headerMoods` array to use it. Custom moods can have 2 or 3 colors.
+Then add the mood name (e.g., `"rainbow"`) to the `headerMoods` array to use it. Custom moods can have any number of colors (1 or more). The gradient will smoothly loop through all colors.
 
 ###### Available Moods
 

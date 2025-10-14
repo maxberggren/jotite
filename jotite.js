@@ -840,65 +840,50 @@ class MarkdownRenderer {
             const gradientColors = [];
             const palette = moodData.colors.map(parseColor);
             
-            if (palette.length === 2) {
-                // 2-color gradient: there and back
-                const halfSteps = Math.floor(steps / 2);
+            if (palette.length === 0) {
+                // No colors defined, skip this mood
+                print(`Warning: Mood "${moodName}" has no colors defined`);
+                continue;
+            } else if (palette.length === 1) {
+                // 1-color mood: use the same color for all steps
+                const color = toHex(palette[0].r, palette[0].g, palette[0].b);
+                for (let i = 0; i < steps; i++) {
+                    gradientColors.push(color);
+                }
+            } else {
+                // N-color gradient (N >= 2): create a smooth loop through all colors and back
+                // For N colors, we have (N-1)*2 segments to create a complete loop
+                const numSegments = (palette.length - 1) * 2;
+                const segmentSteps = Math.floor(steps / numSegments);
                 
-                // First half: color 0 to color 1
-                for (let i = 0; i < halfSteps; i++) {
-                    const ratio = i / (halfSteps - 1);
-                    const r = Math.round(palette[0].r + (palette[1].r - palette[0].r) * ratio);
-                    const g = Math.round(palette[0].g + (palette[1].g - palette[0].g) * ratio);
-                    const b = Math.round(palette[0].b + (palette[1].b - palette[0].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
+                // Helper function to interpolate between two colors
+                const interpolateColors = (color1, color2, ratio) => {
+                    const r = Math.round(color1.r + (color2.r - color1.r) * ratio);
+                    const g = Math.round(color1.g + (color2.g - color1.g) * ratio);
+                    const b = Math.round(color1.b + (color2.b - color1.b) * ratio);
+                    return toHex(r, g, b);
+                };
+                
+                // Forward pass: go through all colors 0->1->2->...->N-1
+                for (let segmentIdx = 0; segmentIdx < palette.length - 1; segmentIdx++) {
+                    const startColor = palette[segmentIdx];
+                    const endColor = palette[segmentIdx + 1];
+                    
+                    for (let i = 0; i < segmentSteps; i++) {
+                        const ratio = i / (segmentSteps - 1 || 1);
+                        gradientColors.push(interpolateColors(startColor, endColor, ratio));
+                    }
                 }
                 
-                // Second half: color 1 back to color 0
-                for (let i = 0; i < halfSteps; i++) {
-                    const ratio = i / (halfSteps - 1);
-                    const r = Math.round(palette[1].r + (palette[0].r - palette[1].r) * ratio);
-                    const g = Math.round(palette[1].g + (palette[0].g - palette[1].g) * ratio);
-                    const b = Math.round(palette[1].b + (palette[0].b - palette[1].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-            } else if (palette.length === 3) {
-                // 3-color gradient: 0->1->2->1->0 for smooth looping
-                const segmentSteps = Math.floor(steps / 4);
-                
-                // Segment 1: color 0 to color 1
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[0].r + (palette[1].r - palette[0].r) * ratio);
-                    const g = Math.round(palette[0].g + (palette[1].g - palette[0].g) * ratio);
-                    const b = Math.round(palette[0].b + (palette[1].b - palette[0].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-                
-                // Segment 2: color 1 to color 2
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[1].r + (palette[2].r - palette[1].r) * ratio);
-                    const g = Math.round(palette[1].g + (palette[2].g - palette[1].g) * ratio);
-                    const b = Math.round(palette[1].b + (palette[2].b - palette[1].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-                
-                // Segment 3: color 2 back to color 1
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[2].r + (palette[1].r - palette[2].r) * ratio);
-                    const g = Math.round(palette[2].g + (palette[1].g - palette[2].g) * ratio);
-                    const b = Math.round(palette[2].b + (palette[1].b - palette[2].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-                
-                // Segment 4: color 1 back to color 0
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[1].r + (palette[0].r - palette[1].r) * ratio);
-                    const g = Math.round(palette[1].g + (palette[0].g - palette[1].g) * ratio);
-                    const b = Math.round(palette[1].b + (palette[0].b - palette[1].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
+                // Backward pass: go back through all colors N-1->...->2->1->0
+                for (let segmentIdx = palette.length - 1; segmentIdx > 0; segmentIdx--) {
+                    const startColor = palette[segmentIdx];
+                    const endColor = palette[segmentIdx - 1];
+                    
+                    for (let i = 0; i < segmentSteps; i++) {
+                        const ratio = i / (segmentSteps - 1 || 1);
+                        gradientColors.push(interpolateColors(startColor, endColor, ratio));
+                    }
                 }
             }
             
@@ -3896,7 +3881,7 @@ class JotWindow extends Adw.ApplicationWindow {
                         _example: "Add your own custom mood gradients here. Example format below:",
                         _exampleMood: ["#FF0000", "#00FF00", "#0000FF"]
                     },
-                    _customMoodsComment: "Custom moods can have 2 or 3 colors for the gradient. Add them here and reference them in headerMoods array."
+                    _customMoodsComment: "Custom moods can have any number of colors for the gradient (1 or more). Add them here and reference them in headerMoods array."
                 }, null, 2);
                 
                 settingsFile.replace_contents(defaultSettings, null, false, 
