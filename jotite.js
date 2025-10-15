@@ -676,6 +676,15 @@ class ThemeManager {
                 color: ${c.white};
                 opacity: 0.3;
                 font-size: 12px;
+                margin: 0;
+                padding: 0;
+                min-width: 0;
+            }
+            
+            .search-match-label:empty {
+                min-width: 0;
+                padding: 0;
+                margin: 0;
             }
 
             .search-match-highlight {
@@ -2705,7 +2714,12 @@ class JotWindow extends Adw.ApplicationWindow {
         // Match count label
         this._matchCountLabel = new Gtk.Label({
             label: '',
-            margin_start: 4,
+            margin_start: 0,
+            margin_end: 0,
+            hexpand: false,
+            vexpand: false,
+            xalign: 0,
+            visible: false, // Hide initially until we have search results
         });
         this._matchCountLabel.add_css_class('search-match-label');
         
@@ -2879,9 +2893,29 @@ class JotWindow extends Adw.ApplicationWindow {
                     // If line is empty bullet (or empty todo), remove it and exit list
                     if (!content.trim() || (hasTodo && !content.slice(hasTodo[0].length).trim())) {
                         print('Empty bullet, removing');
-                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                        
+                        buffer.begin_user_action();
+                        
+                        // Get the iterator for the current cursor position and navigate to line start/end
+                        const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                        const lineStart = cursorIter.copy();
+                        lineStart.set_line_offset(0);
+                        const lineEnd = cursorIter.copy();
+                        lineEnd.set_line_offset(0);
+                        if (!lineEnd.ends_line()) {
+                            lineEnd.forward_to_line_end();
+                        }
+                        
+                        // Delete the line content and replace with empty line
                         buffer.delete(lineStart, lineEnd);
+                        
+                        buffer.end_user_action();
+                        
+                        // Force immediate render to avoid visual glitch
+                        if (this._markdownRenderer) {
+                            this._markdownRenderer._updateSyntaxVisibility();
+                        }
+                        
                         return true;
                     }
                     
@@ -2896,6 +2930,12 @@ class JotWindow extends Adw.ApplicationWindow {
                         newBullet = `\n${indent}${bullet} `;
                     }
                     buffer.insert_at_cursor(newBullet, -1);
+                    
+                    // Force immediate render to avoid visual glitch
+                    if (this._markdownRenderer) {
+                        this._markdownRenderer._updateSyntaxVisibility();
+                    }
+                    
                     return true;
                 }
             }
@@ -2922,7 +2962,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         const lineEndOffset = offset + lineLength;
                         
                         // Check if this line is partially or fully selected
-                        if (selStartOffset <= lineEndOffset && selEndOffset >= offset) {
+                        // Use < and > to avoid including lines that are only touched at boundaries
+                        if (selStartOffset < lineEndOffset && selEndOffset > offset) {
                             if (firstLineNum === -1) firstLineNum = i;
                             lastLineNum = i;
                         }
@@ -2992,6 +3033,9 @@ class JotWindow extends Adw.ApplicationWindow {
                             buffer.select_range(newSelStart, newSelEnd);
                             buffer.end_user_action();
                             
+                            // Scroll to keep selection visible
+                            this._textView.scroll_to_mark(buffer.get_insert(), 0.0, false, 0.0, 0.0);
+                            
                             // Force immediate re-render to avoid visual glitch
                             if (this._markdownRenderer) {
                                 this._markdownRenderer._updateSyntaxVisibility();
@@ -3010,10 +3054,19 @@ class JotWindow extends Adw.ApplicationWindow {
                         
                         // Wrap in user action for proper undo
                         buffer.begin_user_action();
-                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                        
+                        // Get the iterator for the current cursor position and navigate to line start/end
+                        const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                        const lineStart = cursorIter.copy();
+                        lineStart.set_line_offset(0);
+                        const lineEnd = cursorIter.copy();
+                        lineEnd.set_line_offset(0);
+                        if (!lineEnd.ends_line()) {
+                            lineEnd.forward_to_line_end();
+                        }
+                        
                         buffer.delete(lineStart, lineEnd);
-                        const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                        const insertIter = buffer.get_iter_at_offset(lineStart.get_offset());
                         buffer.insert(insertIter, newLine, -1);
                         buffer.end_user_action();
                         
@@ -3049,7 +3102,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         const lineEndOffset = offset + lineLength;
                         
                         // Check if this line is partially or fully selected
-                        if (selStartOffset <= lineEndOffset && selEndOffset >= offset) {
+                        // Use < and > to avoid including lines that are only touched at boundaries
+                        if (selStartOffset < lineEndOffset && selEndOffset > offset) {
                             if (firstLineNum === -1) firstLineNum = i;
                             lastLineNum = i;
                         }
@@ -3122,6 +3176,9 @@ class JotWindow extends Adw.ApplicationWindow {
                             buffer.select_range(newSelStart, newSelEnd);
                             buffer.end_user_action();
                             
+                            // Scroll to keep selection visible
+                            this._textView.scroll_to_mark(buffer.get_insert(), 0.0, false, 0.0, 0.0);
+                            
                             // Force immediate re-render to avoid visual glitch
                             if (this._markdownRenderer) {
                                 this._markdownRenderer._updateSyntaxVisibility();
@@ -3142,10 +3199,19 @@ class JotWindow extends Adw.ApplicationWindow {
                         
                         // Wrap in user action for proper undo
                         buffer.begin_user_action();
-                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                        
+                        // Get the iterator for the current cursor position and navigate to line start/end
+                        const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                        const lineStart = cursorIter.copy();
+                        lineStart.set_line_offset(0);
+                        const lineEnd = cursorIter.copy();
+                        lineEnd.set_line_offset(0);
+                        if (!lineEnd.ends_line()) {
+                            lineEnd.forward_to_line_end();
+                        }
+                        
                         buffer.delete(lineStart, lineEnd);
-                        const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                        const insertIter = buffer.get_iter_at_offset(lineStart.get_offset());
                         buffer.insert(insertIter, newLine, -1);
                         buffer.end_user_action();
                         
@@ -3556,6 +3622,7 @@ class JotWindow extends Adw.ApplicationWindow {
         this._clearSearchHighlights();
         this._searchMatches = [];
         this._currentMatchIndex = -1;
+        this._matchCountLabel.set_visible(false);
         this._textView.grab_focus();
     }
     
@@ -3570,6 +3637,7 @@ class JotWindow extends Adw.ApplicationWindow {
         
         if (!searchText) {
             this._matchCountLabel.set_label('');
+            this._matchCountLabel.set_visible(false);
             return;
         }
         
@@ -3611,8 +3679,10 @@ class JotWindow extends Adw.ApplicationWindow {
         if (this._searchMatches.length > 0) {
             this._currentMatchIndex = 0;
             this._highlightCurrentMatch(false); // Don't grab focus during search
+            this._matchCountLabel.set_visible(true);
             this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
         } else {
+            this._matchCountLabel.set_visible(true);
             this._matchCountLabel.set_label('No matches');
         }
     }
@@ -4020,53 +4090,59 @@ class JotWindow extends Adw.ApplicationWindow {
             return;
         }
         
-        // Get the line above
+        // Build new lines array with the swap
         const targetLineNum = firstLineNum - 1;
-        const targetLineText = lines[targetLineNum];
+        const newLines = [...lines]; // Copy array
         
-        // Get selected lines
-        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
+        // Extract the target line and selected lines
+        const targetLine = newLines[targetLineNum];
+        const selectedLines = newLines.splice(firstLineNum, lastLineNum - firstLineNum + 1);
         
-        // Calculate byte offset where target line starts
-        let targetLineStart = 0;
-        for (let i = 0; i < targetLineNum; i++) {
-            targetLineStart += lines[i].length + 1; // +1 for newline
-        }
+        // Remove the target line (now at firstLineNum - 1 after splice)
+        newLines.splice(targetLineNum, 1);
         
-        // Calculate byte offset where selection ends
-        let selectionEnd = targetLineStart + targetLineText.length + 1;
-        for (let i = firstLineNum; i <= lastLineNum; i++) {
-            selectionEnd += lines[i].length + (i < lastLineNum ? 1 : 0);
-        }
+        // Insert selected lines at target position, then target line after them
+        newLines.splice(targetLineNum, 0, ...selectedLines, targetLine);
         
-        // Delete the target line and selected lines, then reinsert in swapped order
-        const deleteStart = buffer.get_iter_at_offset(targetLineStart);
-        const deleteEnd = buffer.get_iter_at_offset(selectionEnd);
-        
+        // Replace entire buffer content
         buffer.begin_user_action();
-        buffer.delete(deleteStart, deleteEnd);
+        const [start, end] = buffer.get_bounds();
+        buffer.delete(start, end);
+        const newText = newLines.join('\n');
+        buffer.insert(buffer.get_start_iter(), newText, -1);
         
-        const insertIter = buffer.get_iter_at_offset(targetLineStart);
-        const newText = selectedLines.join('\n') + '\n' + targetLineText;
-        buffer.insert(insertIter, newText, -1);
-        
+        // Calculate new cursor position
+        let scrollToIter;
         if (wasSelection) {
-            // Restore selection on the moved lines
-            const newFirstLineStart = targetLineStart;
+            // Restore selection on the moved lines (now one line up)
+            let newFirstLineStart = 0;
+            for (let i = 0; i < targetLineNum; i++) {
+                newFirstLineStart += newLines[i].length + 1;
+            }
+            
             let newLastLineEnd = newFirstLineStart;
             for (let i = 0; i < selectedLines.length; i++) {
-                newLastLineEnd += selectedLines[i].length + (i < selectedLines.length - 1 ? 1 : 0);
+                newLastLineEnd += newLines[targetLineNum + i].length;
+                if (i < selectedLines.length - 1) {
+                    newLastLineEnd += 1;
+                }
             }
             
             const newSelStart = buffer.get_iter_at_offset(newFirstLineStart);
             const newSelEnd = buffer.get_iter_at_offset(newLastLineEnd);
             buffer.select_range(newSelStart, newSelEnd);
+            scrollToIter = newSelStart.copy();
         } else {
             // Move cursor to the new position (one line up, same offset)
-            const firstLineText = selectedLines[0];
-            const newCursorOffset = targetLineStart + Math.min(cursorOffset, firstLineText.length);
+            let newCursorOffset = 0;
+            for (let i = 0; i < targetLineNum; i++) {
+                newCursorOffset += newLines[i].length + 1;
+            }
+            newCursorOffset += Math.min(cursorOffset, newLines[targetLineNum].length);
+            
             const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
             buffer.place_cursor(newCursorIter);
+            scrollToIter = newCursorIter.copy();
         }
         
         buffer.end_user_action();
@@ -4088,7 +4164,11 @@ class JotWindow extends Adw.ApplicationWindow {
             this._markdownRenderer._updateSyntaxVisibility();
         }
         
-        this._textView.scroll_mark_onscreen(buffer.get_insert());
+        // Scroll to the cursor position after a tiny delay to ensure buffer is fully updated
+        GLib.idle_add(GLib.PRIORITY_HIGH_IDLE, () => {
+            this._textView.scroll_to_iter(scrollToIter, 0.0, true, 0.5, 0.5);
+            return false;
+        });
         
         // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
         GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
@@ -4143,54 +4223,61 @@ class JotWindow extends Adw.ApplicationWindow {
             return;
         }
         
-        // Get the line below
+        // Build new lines array with the swap
         const targetLineNum = lastLineNum + 1;
-        const targetLineText = lines[targetLineNum];
+        const newLines = [...lines]; // Copy array
         
-        // Get selected lines
-        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
+        // Extract the target line and selected lines
+        const targetLine = newLines[targetLineNum];
+        const selectedLines = newLines.splice(firstLineNum, lastLineNum - firstLineNum + 1);
         
-        // Calculate byte offset where first selected line starts
-        let firstLineStart = 0;
-        for (let i = 0; i < firstLineNum; i++) {
-            firstLineStart += lines[i].length + 1; // +1 for newline
-        }
+        // Remove the target line (now at firstLineNum after splice removed selected lines)
+        newLines.splice(firstLineNum, 1);
         
-        // Calculate byte offset where target line ends
-        let targetLineEnd = firstLineStart;
-        for (let i = firstLineNum; i <= lastLineNum; i++) {
-            targetLineEnd += lines[i].length + 1;
-        }
-        targetLineEnd += targetLineText.length;
+        // Insert target line at firstLineNum, then selected lines after it
+        newLines.splice(firstLineNum, 0, targetLine, ...selectedLines);
         
-        // Delete the selected lines and target line, then reinsert in swapped order
-        const deleteStart = buffer.get_iter_at_offset(firstLineStart);
-        const deleteEnd = buffer.get_iter_at_offset(targetLineEnd);
-        
+        // Replace entire buffer content
         buffer.begin_user_action();
-        buffer.delete(deleteStart, deleteEnd);
+        const [start, end] = buffer.get_bounds();
+        buffer.delete(start, end);
+        const newText = newLines.join('\n');
+        buffer.insert(buffer.get_start_iter(), newText, -1);
         
-        const insertIter = buffer.get_iter_at_offset(firstLineStart);
-        const newText = targetLineText + '\n' + selectedLines.join('\n');
-        buffer.insert(insertIter, newText, -1);
+        // Calculate new cursor position (one line down from original)
+        const newFirstLineNum = firstLineNum + 1;
+        let scrollToIter;
         
         if (wasSelection) {
             // Restore selection on the moved lines (now one line down)
-            const newFirstLineStart = firstLineStart + targetLineText.length + 1;
+            let newFirstLineStart = 0;
+            for (let i = 0; i < newFirstLineNum; i++) {
+                newFirstLineStart += newLines[i].length + 1;
+            }
+            
             let newLastLineEnd = newFirstLineStart;
             for (let i = 0; i < selectedLines.length; i++) {
-                newLastLineEnd += selectedLines[i].length + (i < selectedLines.length - 1 ? 1 : 0);
+                newLastLineEnd += newLines[newFirstLineNum + i].length;
+                if (i < selectedLines.length - 1) {
+                    newLastLineEnd += 1;
+                }
             }
             
             const newSelStart = buffer.get_iter_at_offset(newFirstLineStart);
             const newSelEnd = buffer.get_iter_at_offset(newLastLineEnd);
             buffer.select_range(newSelStart, newSelEnd);
+            scrollToIter = newSelStart.copy();
         } else {
             // Move cursor to the new position (one line down, same offset)
-            const firstLineText = selectedLines[0];
-            const newCursorOffset = firstLineStart + targetLineText.length + 1 + Math.min(cursorOffset, firstLineText.length);
+            let newCursorOffset = 0;
+            for (let i = 0; i < newFirstLineNum; i++) {
+                newCursorOffset += newLines[i].length + 1;
+            }
+            newCursorOffset += Math.min(cursorOffset, newLines[newFirstLineNum].length);
+            
             const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
             buffer.place_cursor(newCursorIter);
+            scrollToIter = newCursorIter.copy();
         }
         
         buffer.end_user_action();
@@ -4212,7 +4299,11 @@ class JotWindow extends Adw.ApplicationWindow {
             this._markdownRenderer._updateSyntaxVisibility();
         }
         
-        this._textView.scroll_mark_onscreen(buffer.get_insert());
+        // Scroll to the cursor position after a tiny delay to ensure buffer is fully updated
+        GLib.idle_add(GLib.PRIORITY_HIGH_IDLE, () => {
+            this._textView.scroll_to_iter(scrollToIter, 0.0, true, 0.5, 0.5);
+            return false;
+        });
         
         // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
         GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
