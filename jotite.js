@@ -19,6 +19,9 @@ const KEY_S_UPPER = 83;  // 'S' key (with shift)
 const KEY_N = 110;       // 'n' key
 const KEY_O = 111;       // 'o' key
 const KEY_X = 120;       // 'x' key
+const KEY_F = 102;       // 'f' key
+const KEY_G = 103;       // 'g' key
+const KEY_ESCAPE = 65307; // Escape key
 const KEY_PLUS = 61;     // '+' key (also '=' key without shift)
 const KEY_MINUS = 45;    // '-' key
 const KEY_0 = 48;        // '0' key
@@ -612,6 +615,76 @@ class ThemeManager {
             menuitem:hover {
                 background: ${c.blue};
             }
+
+            /* Search bar styling - match status bar */
+            searchbar {
+                background: transparent;
+                background-color: transparent;
+                background-image: none;
+                border-bottom: 1px solid ${hexToRgba(c.white, 0.2)};
+                padding: 0;
+            }
+            
+            searchbar > revealer > box {
+                background: transparent;
+                background-color: transparent;
+            }
+
+            .search-entry {
+                background: transparent;
+                color: ${c.white};
+                border: 1px solid ${hexToRgba(c.white, 0.2)};
+                border-radius: 0;
+                padding: 4px 6px;
+                min-width: 200px;
+                font-size: 12px;
+                min-height: 0;
+            }
+
+            .search-entry:focus {
+                border-color: ${hexToRgba(c.white, 0.4)};
+                outline: none;
+            }
+
+            .search-button {
+                padding: 0px 6px;
+                margin: 0px;
+                border: 1px solid ${hexToRgba(c.white, 0.1)};
+                border-radius: 0;
+                background: transparent;
+                color: ${c.white};
+                opacity: 0.3;
+                font-size: 12px;
+                font-weight: 400;
+                min-width: 0;
+                min-height: 0;
+                cursor: pointer;
+            }
+
+            .search-button:hover {
+                opacity: 0.6;
+                background: transparent;
+                cursor: pointer;
+            }
+            
+            .search-button:checked {
+                border: 1px solid ${c.white};
+                opacity: 1.0;
+            }
+
+            .search-match-label {
+                color: ${c.white};
+                opacity: 0.3;
+                font-size: 12px;
+            }
+
+            .search-match-highlight {
+                background: ${hexToRgba(c.yellow, 0.3)};
+            }
+
+            .search-current-match {
+                background: ${hexToRgba(c.blue, 0.5)};
+            }
         `;
     }
 }
@@ -633,6 +706,7 @@ class MarkdownRenderer {
         this._cursorTimeoutId = null;
         this._textJustChanged = false; // Track if text was recently changed
         this._appliedTags = new Set(); // Track which tags we actually applied (Optimization #1)
+        this._searchMode = false; // Track if we're in search mode to avoid interfering with selections
         
         this._initTags();
         this._setupSignals();
@@ -722,7 +796,7 @@ class MarkdownRenderer {
          'bullet-margin', 'sub-bullet-margin', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
          'todo-unchecked-inside', 'todo-checked-inside', 'todo-checked-text',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
-         'table-pipe', 'table-separator', 'table-header', 'table-cell'];
+         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'search-highlight', 'search-current'];
         
         // Add gradient background tags to removal list for all moods
         const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
@@ -1050,6 +1124,19 @@ class MarkdownRenderer {
             name: 'table-cell',
         });
         tagTable.add(tableCellTag);
+        
+        // Search highlight tags
+        const searchHighlightTag = new Gtk.TextTag({
+            name: 'search-highlight',
+            background_rgba: this._colorWithOpacity(this.colors.yellow, 0.3),
+        });
+        tagTable.add(searchHighlightTag);
+        
+        const searchCurrentTag = new Gtk.TextTag({
+            name: 'search-current',
+            background_rgba: this._colorWithOpacity(this.colors.blue, 0.5),
+        });
+        tagTable.add(searchCurrentTag);
     }
     
     _setupSignals() {
@@ -1103,7 +1190,7 @@ class MarkdownRenderer {
         
         // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
         this.buffer.connect('notify::cursor-position', () => {
-            if (!this.updating && !this._textJustChanged) {
+            if (!this.updating && !this._textJustChanged && !this._searchMode) {
                 // Cancel previous timeout if exists
                 if (this._cursorTimeoutId) {
                     GLib.source_remove(this._cursorTimeoutId);
@@ -2539,12 +2626,129 @@ class JotWindow extends Adw.ApplicationWindow {
             spacing: 0,
         });
 
+        mainBox.append(this._createSearchBar());
         mainBox.append(this._createTextView());
         mainBox.append(this._createStatusBar());
 
         this.set_content(mainBox);
     }
 
+    _createSearchBar() {
+        // Create search bar (initially hidden)
+        this._searchBar = new Gtk.SearchBar({
+            search_mode_enabled: false,
+        });
+        
+        // Create search box layout (match status bar styling)
+        const searchBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 4,
+            halign: Gtk.Align.CENTER,
+            height_request: 20,
+            margin_start: 0,
+            margin_end: 0,
+            margin_top: 0,
+            margin_bottom: 0,
+        });
+        
+        // Create search entry
+        this._searchEntry = new Gtk.SearchEntry({
+            placeholder_text: 'Search...',
+            hexpand: false,
+        });
+        this._searchEntry.add_css_class('search-entry');
+        
+        // Connect search entry signals
+        this._searchEntry.connect('search-changed', () => {
+            this._performSearch();
+        });
+        
+        // Handle Enter key using both methods for compatibility
+        // Method 1: activate signal (standard way for SearchEntry)
+        this._searchEntry.connect('activate', () => {
+            this._findNextKeepFocus(); // Stay in search box
+        });
+        
+        // Method 2: Key controller for Shift+Enter
+        const searchKeyController = new Gtk.EventControllerKey();
+        searchKeyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            if ((keyval === KEY_ENTER || keyval === KEY_KP_ENTER) && (state & SHIFT_MASK)) {
+                this._findPreviousKeepFocus(); // Stay in search box
+                return true;
+            }
+            return false;
+        });
+        this._searchEntry.add_controller(searchKeyController);
+        
+        this._searchEntry.connect('stop-search', () => {
+            this._hideSearch();
+        });
+        
+        // Previous button
+        const prevButton = new Gtk.Button({
+            label: '↑',
+            tooltip_text: 'Previous match (Shift+Enter)',
+        });
+        prevButton.add_css_class('search-button');
+        prevButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        prevButton.connect('clicked', () => this._findPreviousKeepFocus());
+        
+        // Next button
+        const nextButton = new Gtk.Button({
+            label: '↓',
+            tooltip_text: 'Next match (Enter)',
+        });
+        nextButton.add_css_class('search-button');
+        nextButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        nextButton.connect('clicked', () => this._findNextKeepFocus());
+        
+        // Match count label
+        this._matchCountLabel = new Gtk.Label({
+            label: '',
+            margin_start: 4,
+        });
+        this._matchCountLabel.add_css_class('search-match-label');
+        
+        // Case sensitive toggle
+        this._caseSensitiveButton = new Gtk.ToggleButton({
+            label: 'Aa',
+            tooltip_text: 'Case sensitive',
+        });
+        this._caseSensitiveButton.add_css_class('search-button');
+        this._caseSensitiveButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        this._caseSensitiveButton.connect('toggled', () => {
+            this._performSearch();
+        });
+        
+        // Close button
+        const closeButton = new Gtk.Button({
+            label: '×',
+            tooltip_text: 'Close (Escape)',
+        });
+        closeButton.add_css_class('search-button');
+        closeButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        closeButton.connect('clicked', () => this._hideSearch());
+        
+        // Add widgets to search box
+        searchBox.append(this._searchEntry);
+        searchBox.append(prevButton);
+        searchBox.append(nextButton);
+        searchBox.append(this._matchCountLabel);
+        searchBox.append(this._caseSensitiveButton);
+        searchBox.append(closeButton);
+        
+        this._searchBar.set_child(searchBox);
+        this._searchBar.set_key_capture_widget(this);
+        
+        // Connect the search entry to the search bar (fixes GTK warning)
+        this._searchBar.connect_entry(this._searchEntry);
+        
+        // Initialize search state
+        this._searchMatches = [];
+        this._currentMatchIndex = -1;
+        
+        return this._searchBar;
+    }
 
     _createTextView() {
         this._textView = new Gtk.TextView({
@@ -3311,9 +3515,204 @@ class JotWindow extends Adw.ApplicationWindow {
         }
     }
 
+    _showSearch() {
+        // Check if search is already open
+        const alreadyOpen = this._searchBar.get_search_mode();
+        
+        // Enable search mode in markdown renderer to prevent interference
+        if (this._markdownRenderer) {
+            this._markdownRenderer._searchMode = true;
+        }
+        
+        this._searchBar.set_search_mode(true);
+        this._searchEntry.grab_focus();
+        
+        if (alreadyOpen) {
+            // If search is already open, just select all text in search box
+            this._searchEntry.select_region(0, -1);
+        } else {
+            // If opening fresh, check if there's selected text to use as search term
+            const buffer = this._textView.get_buffer();
+            const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+            if (hasSelection) {
+                const selectedText = buffer.get_text(selStart, selEnd, false);
+                if (selectedText && selectedText.indexOf('\n') === -1) { // Only if single line
+                    this._searchEntry.set_text(selectedText);
+                    this._searchEntry.select_region(0, -1); // Select all text in entry
+                }
+            }
+            
+            this._performSearch();
+        }
+    }
+    
+    _hideSearch() {
+        // Disable search mode in markdown renderer
+        if (this._markdownRenderer) {
+            this._markdownRenderer._searchMode = false;
+        }
+        
+        this._searchBar.set_search_mode(false);
+        this._clearSearchHighlights();
+        this._searchMatches = [];
+        this._currentMatchIndex = -1;
+        this._textView.grab_focus();
+    }
+    
+    _performSearch() {
+        const searchText = this._searchEntry.get_text();
+        const buffer = this._textView.get_buffer();
+        
+        // Clear previous highlights
+        this._clearSearchHighlights();
+        this._searchMatches = [];
+        this._currentMatchIndex = -1;
+        
+        if (!searchText) {
+            this._matchCountLabel.set_label('');
+            return;
+        }
+        
+        // Get search flags
+        const caseSensitive = this._caseSensitiveButton.get_active();
+        let flags = Gtk.TextSearchFlags.VISIBLE_ONLY | Gtk.TextSearchFlags.TEXT_ONLY;
+        if (!caseSensitive) {
+            flags |= Gtk.TextSearchFlags.CASE_INSENSITIVE;
+        }
+        
+        // Find all matches
+        const [start, end] = buffer.get_bounds();
+        let searchIter = start.copy();
+        
+        while (true) {
+            const result = searchIter.forward_search(searchText, flags, end);
+            
+            // forward_search returns [found, match_start, match_end] where found is boolean
+            if (!result || !result[0]) break;
+            
+            const matchStart = result[1];
+            const matchEnd = result[2];
+            
+            if (!matchStart || !matchEnd) break;
+            
+            this._searchMatches.push({
+                start: matchStart.get_offset(),
+                end: matchEnd.get_offset()
+            });
+            
+            // Highlight this match
+            buffer.apply_tag_by_name('search-highlight', matchStart, matchEnd);
+            
+            // Move search iter forward
+            searchIter = matchEnd.copy();
+        }
+        
+        // Update match count
+        if (this._searchMatches.length > 0) {
+            this._currentMatchIndex = 0;
+            this._highlightCurrentMatch(false); // Don't grab focus during search
+            this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+        } else {
+            this._matchCountLabel.set_label('No matches');
+        }
+    }
+    
+    _findNext() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex + 1) % this._searchMatches.length;
+        this._highlightCurrentMatch(true); // Grab focus when navigating
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _findPrevious() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex - 1 + this._searchMatches.length) % this._searchMatches.length;
+        this._highlightCurrentMatch(true); // Grab focus when navigating
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _findNextKeepFocus() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex + 1) % this._searchMatches.length;
+        this._highlightCurrentMatch(false); // Don't grab focus - stay in search box
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _findPreviousKeepFocus() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex - 1 + this._searchMatches.length) % this._searchMatches.length;
+        this._highlightCurrentMatch(false); // Don't grab focus - stay in search box
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _highlightCurrentMatch(grabFocus = false) {
+        if (this._currentMatchIndex < 0 || this._currentMatchIndex >= this._searchMatches.length) return;
+        
+        const buffer = this._textView.get_buffer();
+        
+        // Remove current match highlight from all matches
+        for (const match of this._searchMatches) {
+            const matchStart = buffer.get_iter_at_offset(match.start);
+            const matchEnd = buffer.get_iter_at_offset(match.end);
+            buffer.remove_tag_by_name('search-current', matchStart, matchEnd);
+        }
+        
+        // Highlight and SELECT current match
+        const currentMatch = this._searchMatches[this._currentMatchIndex];
+        const matchStart = buffer.get_iter_at_offset(currentMatch.start);
+        const matchEnd = buffer.get_iter_at_offset(currentMatch.end);
+        buffer.apply_tag_by_name('search-current', matchStart, matchEnd);
+        
+        // Create selection using buffer.select_range
+        buffer.select_range(matchStart, matchEnd);
+        
+        // Scroll to make the match visible
+        this._textView.scroll_to_iter(matchStart, 0.0, true, 0.5, 0.5);
+        
+        // Give focus to textview so selection is visible (only when explicitly requested)
+        if (grabFocus) {
+            this._textView.grab_focus();
+        }
+    }
+    
+    _clearSearchHighlights() {
+        const buffer = this._textView.get_buffer();
+        const [start, end] = buffer.get_bounds();
+        buffer.remove_tag_by_name('search-highlight', start, end);
+        buffer.remove_tag_by_name('search-current', start, end);
+    }
+
     _setupKeyboardShortcuts() {
         const keyController = new Gtk.EventControllerKey();
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            // Ctrl+F: Show search
+            if (keyval === KEY_F && (state & CTRL_MASK)) {
+                this._showSearch();
+                return true;
+            }
+            // Escape: Hide search (if search is active)
+            if (keyval === KEY_ESCAPE && this._searchBar.get_search_mode()) {
+                this._hideSearch();
+                return true;
+            }
+            // Ctrl+G or F3: Find next
+            if ((keyval === KEY_G && (state & CTRL_MASK) && !(state & SHIFT_MASK)) || keyval === 65470) {
+                if (this._searchBar.get_search_mode()) {
+                    this._findNext();
+                    return true;
+                }
+            }
+            // Ctrl+Shift+G or Shift+F3: Find previous
+            if ((keyval === KEY_G && (state & CTRL_MASK) && (state & SHIFT_MASK)) || (keyval === 65470 && (state & SHIFT_MASK))) {
+                if (this._searchBar.get_search_mode()) {
+                    this._findPrevious();
+                    return true;
+                }
+            }
             if ((keyval === KEY_ENTER || keyval === KEY_S) && (state & CTRL_MASK) && !(state & SHIFT_MASK)) {
                 this._saveNote();
                 return true;
@@ -3937,6 +4336,10 @@ Jotite is a minimalist markdown note-taking application with live rendering.
 - **Ctrl+Shift+S**: Save As
 - **Ctrl+N**: New note
 - **Ctrl+O**: Open note
+- **Ctrl+F**: Find/Search
+- **Ctrl+G** or **F3**: Find next
+- **Ctrl+Shift+G** or **Shift+F3**: Find previous
+- **Escape**: Close search
 - **Ctrl+Plus**: Zoom in
 - **Ctrl+Minus**: Zoom out
 - **Ctrl+0**: Reset zoom
