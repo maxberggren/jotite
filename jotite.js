@@ -3098,6 +3098,45 @@ class JotWindow extends Adw.ApplicationWindow {
             if (keyval === 65289 && !(state & CTRL_MASK)) {
                 print('Tab key detected');
                 
+                // Check if we're on a header line first (headers take priority)
+                const headerMatch = lineText.match(/^(#{1,})(\s+)(.+)$/);
+                if (headerMatch) {
+                    print('Increasing header level');
+                    const [, hashes, spaces, content] = headerMatch;
+                    const newLine = `#${hashes}${spaces}${content}`;
+                    
+                    // Wrap in user action for proper undo
+                    buffer.begin_user_action();
+                    
+                    // Get the iterator for the current cursor position and navigate to line start/end
+                    const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                    const cursorLineOffset = cursorIter.get_line_offset();
+                    const lineStart = cursorIter.copy();
+                    lineStart.set_line_offset(0);
+                    const lineStartOffset = lineStart.get_offset(); // Save absolute offset before modifications
+                    const lineEnd = cursorIter.copy();
+                    lineEnd.set_line_offset(0);
+                    if (!lineEnd.ends_line()) {
+                        lineEnd.forward_to_line_end();
+                    }
+                    
+                    buffer.delete(lineStart, lineEnd);
+                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                    buffer.insert(insertIter, newLine, -1);
+                    
+                    // Restore cursor position (adjusted for added #)
+                    const newCursorIter = buffer.get_iter_at_offset(lineStartOffset + cursorLineOffset + 1);
+                    buffer.place_cursor(newCursorIter);
+                    buffer.end_user_action();
+                    
+                    // Force immediate re-render to avoid visual glitch
+                    if (this._markdownRenderer) {
+                        this._markdownRenderer._updateSyntaxVisibility();
+                    }
+                    
+                    return true;
+                }
+                
                 // Check if there's a selection
                 const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
                 
@@ -3237,6 +3276,45 @@ class JotWindow extends Adw.ApplicationWindow {
             // Handle Shift+Tab key (ISO_Left_Tab = 65056)
             if (keyval === 65056) {
                 print('Shift+Tab detected');
+                
+                // Check if we're on a header line first (headers take priority)
+                const headerMatch = lineText.match(/^(#{2,})(\s+)(.+)$/);
+                if (headerMatch) {
+                    print('Decreasing header level');
+                    const [, hashes, spaces, content] = headerMatch;
+                    const newLine = `${hashes.substring(1)}${spaces}${content}`;
+                    
+                    // Wrap in user action for proper undo
+                    buffer.begin_user_action();
+                    
+                    // Get the iterator for the current cursor position and navigate to line start/end
+                    const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                    const cursorLineOffset = cursorIter.get_line_offset();
+                    const lineStart = cursorIter.copy();
+                    lineStart.set_line_offset(0);
+                    const lineStartOffset = lineStart.get_offset(); // Save absolute offset before modifications
+                    const lineEnd = cursorIter.copy();
+                    lineEnd.set_line_offset(0);
+                    if (!lineEnd.ends_line()) {
+                        lineEnd.forward_to_line_end();
+                    }
+                    
+                    buffer.delete(lineStart, lineEnd);
+                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                    buffer.insert(insertIter, newLine, -1);
+                    
+                    // Restore cursor position (adjusted for removed #)
+                    const newCursorIter = buffer.get_iter_at_offset(lineStartOffset + Math.max(0, cursorLineOffset - 1));
+                    buffer.place_cursor(newCursorIter);
+                    buffer.end_user_action();
+                    
+                    // Force immediate re-render to avoid visual glitch
+                    if (this._markdownRenderer) {
+                        this._markdownRenderer._updateSyntaxVisibility();
+                    }
+                    
+                    return true;
+                }
                 
                 // Check if there's a selection
                 const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
