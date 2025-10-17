@@ -3270,14 +3270,12 @@ class JotWindow extends Adw.ApplicationWindow {
             
             // Handle Ctrl+Up: Move line up
             if (keyval === KEY_UP && (state & CTRL_MASK)) {
-                print('Ctrl+Up detected');
                 this._moveLineUp();
                 return true;
             }
             
             // Handle Ctrl+Down: Move line down
             if (keyval === KEY_DOWN && (state & CTRL_MASK)) {
-                print('Ctrl+Down detected');
                 this._moveLineDown();
                 return true;
             }
@@ -4090,59 +4088,78 @@ class JotWindow extends Adw.ApplicationWindow {
             return;
         }
         
-        // Build new lines array with the swap
+        // Build new lines for the affected region only
         const targetLineNum = firstLineNum - 1;
-        const newLines = [...lines]; // Copy array
+        const targetLine = lines[targetLineNum];
+        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
         
-        // Extract the target line and selected lines
-        const targetLine = newLines[targetLineNum];
-        const selectedLines = newLines.splice(firstLineNum, lastLineNum - firstLineNum + 1);
+        // Create the reordered text for this region
+        const reorderedLines = [...selectedLines, targetLine];
+        const reorderedText = reorderedLines.join('\n');
         
-        // Remove the target line (now at firstLineNum - 1 after splice)
-        newLines.splice(targetLineNum, 1);
+        // Use GTK's line-based API to avoid UTF-8 byte offset issues
+        // Get iterator at start of buffer, then move to target line
+        const deleteStart = buffer.get_start_iter();
+        for (let i = 0; i < targetLineNum; i++) {
+            deleteStart.forward_line();
+        }
         
-        // Insert selected lines at target position, then target line after them
-        newLines.splice(targetLineNum, 0, ...selectedLines, targetLine);
+        const deleteEnd = buffer.get_start_iter();
+        for (let i = 0; i < lastLineNum; i++) {
+            deleteEnd.forward_line();
+        }
+        // Move to end of lastLineNum
+        if (!deleteEnd.ends_line()) {
+            deleteEnd.forward_to_line_end();
+        }
+        // Include the newline after lastLineNum if it exists
+        if (lastLineNum < lines.length - 1) {
+            deleteEnd.forward_char();
+        }
         
-        // Replace entire buffer content
+        const deleteStartOffset = deleteStart.get_offset();
+        
+        // Replace with reordered lines
+        // Add trailing newline unless we're at the very last line of the file
+        const needsTrailingNewline = lastLineNum < lines.length - 1;
+        const textToInsert = needsTrailingNewline ? reorderedText + '\n' : reorderedText;
+        
         buffer.begin_user_action();
-        const [start, end] = buffer.get_bounds();
-        buffer.delete(start, end);
-        const newText = newLines.join('\n');
-        buffer.insert(buffer.get_start_iter(), newText, -1);
+        
+        // Get the mark at deleteStart BEFORE deletion so we can find it after
+        const insertMark = buffer.create_mark(null, deleteStart, false);
+        
+        buffer.delete(deleteStart, deleteEnd);
+        
+        // Get iterator at the mark, which stayed at the deletion point
+        const insertIter = buffer.get_iter_at_mark(insertMark);
+        buffer.insert(insertIter, textToInsert, -1);
+        
+        // Clean up the mark
+        buffer.delete_mark(insertMark);
         
         // Calculate new cursor position
-        let scrollToIter;
         if (wasSelection) {
-            // Restore selection on the moved lines (now one line up)
-            let newFirstLineStart = 0;
-            for (let i = 0; i < targetLineNum; i++) {
-                newFirstLineStart += newLines[i].length + 1;
-            }
+            // Selection starts at beginning of what was firstLineNum (now targetLineNum)
+            const newSelStartOffset = deleteStartOffset;
             
-            let newLastLineEnd = newFirstLineStart;
+            // Selection ends at the end of the moved lines
+            let selectionLength = 0;
             for (let i = 0; i < selectedLines.length; i++) {
-                newLastLineEnd += newLines[targetLineNum + i].length;
+                selectionLength += selectedLines[i].length;
                 if (i < selectedLines.length - 1) {
-                    newLastLineEnd += 1;
+                    selectionLength += 1; // newline
                 }
             }
             
-            const newSelStart = buffer.get_iter_at_offset(newFirstLineStart);
-            const newSelEnd = buffer.get_iter_at_offset(newLastLineEnd);
-            buffer.select_range(newSelStart, newSelEnd);
-            scrollToIter = newSelStart.copy();
+            const newSelStart = buffer.get_iter_at_offset(newSelStartOffset);
+            const newSelEndIter = buffer.get_iter_at_offset(newSelStartOffset + selectionLength);
+            buffer.select_range(newSelStart, newSelEndIter);
         } else {
-            // Move cursor to the new position (one line up, same offset)
-            let newCursorOffset = 0;
-            for (let i = 0; i < targetLineNum; i++) {
-                newCursorOffset += newLines[i].length + 1;
-            }
-            newCursorOffset += Math.min(cursorOffset, newLines[targetLineNum].length);
-            
+            // Cursor moves to same line (now one up) with same offset
+            const newCursorOffset = deleteStartOffset + Math.min(cursorOffset, selectedLines[0].length);
             const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
             buffer.place_cursor(newCursorIter);
-            scrollToIter = newCursorIter.copy();
         }
         
         buffer.end_user_action();
@@ -4163,12 +4180,6 @@ class JotWindow extends Adw.ApplicationWindow {
             // Do immediate render
             this._markdownRenderer._updateSyntaxVisibility();
         }
-        
-        // Scroll to the cursor position after a tiny delay to ensure buffer is fully updated
-        GLib.idle_add(GLib.PRIORITY_HIGH_IDLE, () => {
-            this._textView.scroll_to_iter(scrollToIter, 0.0, true, 0.5, 0.5);
-            return false;
-        });
         
         // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
         GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
@@ -4223,61 +4234,79 @@ class JotWindow extends Adw.ApplicationWindow {
             return;
         }
         
-        // Build new lines array with the swap
+        // Build new lines for the affected region only
         const targetLineNum = lastLineNum + 1;
-        const newLines = [...lines]; // Copy array
+        const targetLine = lines[targetLineNum];
+        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
         
-        // Extract the target line and selected lines
-        const targetLine = newLines[targetLineNum];
-        const selectedLines = newLines.splice(firstLineNum, lastLineNum - firstLineNum + 1);
+        // Create the reordered text for this region (target line first, then selected lines)
+        const reorderedLines = [targetLine, ...selectedLines];
+        const reorderedText = reorderedLines.join('\n');
         
-        // Remove the target line (now at firstLineNum after splice removed selected lines)
-        newLines.splice(firstLineNum, 1);
+        // Use GTK's line-based API to avoid UTF-8 byte offset issues
+        // Get iterator at start of buffer, then move to target line
+        const deleteStart = buffer.get_start_iter();
+        for (let i = 0; i < firstLineNum; i++) {
+            deleteStart.forward_line();
+        }
         
-        // Insert target line at firstLineNum, then selected lines after it
-        newLines.splice(firstLineNum, 0, targetLine, ...selectedLines);
+        const deleteEnd = buffer.get_start_iter();
+        for (let i = 0; i < targetLineNum; i++) {
+            deleteEnd.forward_line();
+        }
+        // Move to end of targetLineNum
+        if (!deleteEnd.ends_line()) {
+            deleteEnd.forward_to_line_end();
+        }
+        // Include the newline after targetLineNum if it exists
+        if (targetLineNum < lines.length - 1) {
+            deleteEnd.forward_char();
+        }
         
-        // Replace entire buffer content
+        const deleteStartOffset = deleteStart.get_offset();
+        
+        // Replace with reordered lines
+        // Add trailing newline unless we're at the very last line of the file
+        const needsTrailingNewline = targetLineNum < lines.length - 1;
+        const textToInsert = needsTrailingNewline ? reorderedText + '\n' : reorderedText;
+        
         buffer.begin_user_action();
-        const [start, end] = buffer.get_bounds();
-        buffer.delete(start, end);
-        const newText = newLines.join('\n');
-        buffer.insert(buffer.get_start_iter(), newText, -1);
+        
+        // Get the mark at deleteStart BEFORE deletion so we can find it after
+        const insertMark = buffer.create_mark(null, deleteStart, false);
+        
+        buffer.delete(deleteStart, deleteEnd);
+        
+        // Get iterator at the mark, which stayed at the deletion point
+        const insertIter = buffer.get_iter_at_mark(insertMark);
+        buffer.insert(insertIter, textToInsert, -1);
+        
+        // Clean up the mark
+        buffer.delete_mark(insertMark);
         
         // Calculate new cursor position (one line down from original)
-        const newFirstLineNum = firstLineNum + 1;
-        let scrollToIter;
+        // The selected lines are now after the target line (plus newline between them)
+        const newSelStartOffset = deleteStartOffset + targetLine.length + 1; // +1 for newline after target
         
         if (wasSelection) {
-            // Restore selection on the moved lines (now one line down)
-            let newFirstLineStart = 0;
-            for (let i = 0; i < newFirstLineNum; i++) {
-                newFirstLineStart += newLines[i].length + 1;
-            }
-            
-            let newLastLineEnd = newFirstLineStart;
+            // Selection starts at beginning of what was firstLineNum (now after targetLine)
+            // Selection ends at the end of the moved lines
+            let selectionLength = 0;
             for (let i = 0; i < selectedLines.length; i++) {
-                newLastLineEnd += newLines[newFirstLineNum + i].length;
+                selectionLength += selectedLines[i].length;
                 if (i < selectedLines.length - 1) {
-                    newLastLineEnd += 1;
+                    selectionLength += 1; // newline
                 }
             }
             
-            const newSelStart = buffer.get_iter_at_offset(newFirstLineStart);
-            const newSelEnd = buffer.get_iter_at_offset(newLastLineEnd);
-            buffer.select_range(newSelStart, newSelEnd);
-            scrollToIter = newSelStart.copy();
+            const newSelStart = buffer.get_iter_at_offset(newSelStartOffset);
+            const newSelEndIter = buffer.get_iter_at_offset(newSelStartOffset + selectionLength);
+            buffer.select_range(newSelStart, newSelEndIter);
         } else {
-            // Move cursor to the new position (one line down, same offset)
-            let newCursorOffset = 0;
-            for (let i = 0; i < newFirstLineNum; i++) {
-                newCursorOffset += newLines[i].length + 1;
-            }
-            newCursorOffset += Math.min(cursorOffset, newLines[newFirstLineNum].length);
-            
+            // Cursor moves to same line (now one down) with same offset
+            const newCursorOffset = newSelStartOffset + Math.min(cursorOffset, selectedLines[0].length);
             const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
             buffer.place_cursor(newCursorIter);
-            scrollToIter = newCursorIter.copy();
         }
         
         buffer.end_user_action();
@@ -4298,12 +4327,6 @@ class JotWindow extends Adw.ApplicationWindow {
             // Do immediate render
             this._markdownRenderer._updateSyntaxVisibility();
         }
-        
-        // Scroll to the cursor position after a tiny delay to ensure buffer is fully updated
-        GLib.idle_add(GLib.PRIORITY_HIGH_IDLE, () => {
-            this._textView.scroll_to_iter(scrollToIter, 0.0, true, 0.5, 0.5);
-            return false;
-        });
         
         // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
         GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
