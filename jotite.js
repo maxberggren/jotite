@@ -793,12 +793,40 @@ class MarkdownRenderer {
         return rgba;
     }
     
+    _isEmoji(char) {
+        // Check if character is an emoji based on Unicode ranges
+        const codePoint = char.codePointAt(0);
+        if (!codePoint) return false;
+        
+        // Common emoji ranges
+        return (
+            (codePoint >= 0x1F600 && codePoint <= 0x1F64F) || // Emoticons
+            (codePoint >= 0x1F300 && codePoint <= 0x1F5FF) || // Misc Symbols and Pictographs
+            (codePoint >= 0x1F680 && codePoint <= 0x1F6FF) || // Transport and Map
+            (codePoint >= 0x1F1E0 && codePoint <= 0x1F1FF) || // Regional flags
+            (codePoint >= 0x2600 && codePoint <= 0x26FF) ||   // Misc symbols
+            (codePoint >= 0x2700 && codePoint <= 0x27BF) ||   // Dingbats
+            (codePoint >= 0xFE00 && codePoint <= 0xFE0F) ||   // Variation Selectors
+            (codePoint >= 0x1F900 && codePoint <= 0x1F9FF) || // Supplemental Symbols and Pictographs
+            (codePoint >= 0x1FA00 && codePoint <= 0x1FA6F) || // Chess Symbols
+            (codePoint >= 0x1FA70 && codePoint <= 0x1FAFF) || // Symbols and Pictographs Extended-A
+            (codePoint >= 0x231A && codePoint <= 0x231B) ||   // Watch
+            (codePoint >= 0x23E9 && codePoint <= 0x23F3) ||   // Arrows
+            (codePoint >= 0x25AA && codePoint <= 0x25AB) ||   // Squares
+            (codePoint >= 0x25B6 && codePoint <= 0x25C0) ||   // Triangles
+            (codePoint >= 0x25FB && codePoint <= 0x25FE) ||   // Squares
+            (codePoint >= 0x2B50 && codePoint <= 0x2B55) ||   // Stars
+            (codePoint >= 0x203C && codePoint <= 0x3299)      // Various symbols
+        );
+    }
+    
     _initTags() {
         const tagTable = this.buffer.get_tag_table();
         
         // Remove existing tags if they exist
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
+         'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
          'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'bullet-star', 'bullet-star-near', 
          'bullet-margin', 'sub-bullet-margin', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
          'todo-unchecked-inside', 'todo-checked-inside', 'todo-checked-text',
@@ -901,6 +929,18 @@ class MarkdownRenderer {
                 scale: scales[i-1],
                 weight: 400,
                 family: 'pxlxxl',
+            });
+            tagTable.add(tag);
+        }
+        
+        // Emoji tags for headers: emojis need smaller scale to match pixel font size
+        // Emojis are significantly larger than pixel fonts, so scale them down by ~0.60
+        const emojiScales = scales.map(s => s * 0.60);
+        for (let i = 1; i <= 6; i++) {
+            const tag = new Gtk.TextTag({
+                name: `emoji-h${i}`,
+                scale: emojiScales[i-1],
+                weight: 400,
             });
             tagTable.add(tag);
         }
@@ -1397,6 +1437,7 @@ class MarkdownRenderer {
         // Remove syntax tags but preserve margin tags
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
+         'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
          'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'todo-checked-text', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
          'table-pipe', 'table-separator', 'table-header', 'table-cell', 'hr-line', 'hr-line-dim'];
@@ -1508,12 +1549,33 @@ class MarkdownRenderer {
             // Apply gradient with 45-degree diagonal pattern
             // Calculate actual content start position accounting for all spaces
             const contentStart = lineOffset + hashes.length + spaces.length;
-            for (let i = 0; i < content.length; i++) {
+            
+            // Use Array.from to properly iterate Unicode code points (handles emojis correctly)
+            const chars = Array.from(content);
+            
+            // GTK TextBuffer counts each character (including emojis) as 1 position
+            for (let i = 0; i < chars.length; i++) {
+                const char = chars[i];
+                
+                // Each character is 1 position in GTK buffer (even emojis)
                 const charStart = this.buffer.get_iter_at_offset(contentStart + i);
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
+                
                 // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                
+                // Check if this is an emoji - emojis need special handling
+                const isEmoji = this._isEmoji(char);
+                
+                if (isEmoji) {
+                    // For emojis: only apply the emoji scale tag (not the gradient tag)
+                    // The emoji tag already has the correct scaled-down size
+                    print(`Detected emoji '${char}' at position ${i}, applying emoji-h${styleLevel} tag only`);
+                    this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
+                } else {
+                    // For regular text: apply the gradient tag with header scale
+                    this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                }
             }
             // Don't return - continue to apply inline formatting to header content
         }
@@ -2022,12 +2084,33 @@ class MarkdownRenderer {
             // Apply gradient with 45-degree diagonal pattern
             // Calculate actual content start position accounting for all spaces
             const contentStart = lineOffset + hashes.length + spaces.length;
-            for (let i = 0; i < content.length; i++) {
+            
+            // Use Array.from to properly iterate Unicode code points (handles emojis correctly)
+            const chars = Array.from(content);
+            
+            // GTK TextBuffer counts each character (including emojis) as 1 position
+            for (let i = 0; i < chars.length; i++) {
+                const char = chars[i];
+                
+                // Each character is 1 position in GTK buffer (even emojis)
                 const charStart = this.buffer.get_iter_at_offset(contentStart + i);
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
+                
                 // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                
+                // Check if this is an emoji - emojis need special handling
+                const isEmoji = this._isEmoji(char);
+                
+                if (isEmoji) {
+                    // For emojis: only apply the emoji scale tag (not the gradient tag)
+                    // The emoji tag already has the correct scaled-down size
+                    print(`Detected emoji '${char}' at position ${i}, applying emoji-h${styleLevel} tag only`);
+                    this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
+                } else {
+                    // For regular text: apply the gradient tag with header scale
+                    this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                }
             }
             // Don't return - continue to apply inline formatting to header content
         }
