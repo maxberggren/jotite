@@ -658,16 +658,14 @@ class ThemeManager {
                 font-weight: 400;
                 min-width: 0;
                 min-height: 0;
-                cursor: pointer;
             }
 
             .search-button:hover {
                 opacity: 0.6;
                 background: transparent;
-                cursor: pointer;
             }
             
-            .search-button:checked {
+            button.search-button:checked {
                 border: 1px solid ${c.white};
                 opacity: 1.0;
             }
@@ -805,13 +803,24 @@ class MarkdownRenderer {
          'bullet-margin', 'sub-bullet-margin', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
          'todo-unchecked-inside', 'todo-checked-inside', 'todo-checked-text',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
-         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'search-highlight', 'search-current'];
+         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'search-highlight', 'search-current',
+         'hr-line', 'hr-line-dim'];
         
-        // Add gradient background tags to removal list for all moods
-        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
+        // Add gradient background tags to removal list for all moods (including custom ones)
+        // Use existing mood names from this.moodConfig if available, otherwise use defaults
+        let moodNamesToRemove = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
                           'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
                           'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
-        for (const moodName of moodNames) {
+        
+        // If we have existing mood config, add all its mood names to removal list
+        if (this.moodConfig && Object.keys(this.moodConfig).length > 0) {
+            moodNamesToRemove = moodNamesToRemove.concat(Object.keys(this.moodConfig));
+        }
+        
+        // Remove duplicates
+        moodNamesToRemove = [...new Set(moodNamesToRemove)];
+        
+        for (const moodName of moodNamesToRemove) {
             for (let level = 1; level <= 6; level++) {
                 for (let i = 0; i < 30; i++) {
                     tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
@@ -1146,6 +1155,22 @@ class MarkdownRenderer {
             background_rgba: this._colorWithOpacity(this.colors.blue, 0.5),
         });
         tagTable.add(searchCurrentTag);
+        
+        // Horizontal rule: full-width line (when cursor is away)
+        const hrLineTag = new Gtk.TextTag({
+            name: 'hr-line',
+            foreground: this.colors.background, // Make text invisible by matching background
+            strikethrough: true,
+            strikethrough_rgba: this._colorWithOpacity(this.colors.foreground, 0.3), // Visible line through the middle
+        });
+        tagTable.add(hrLineTag);
+        
+        // Horizontal rule: dim dashes (when cursor is on line)
+        const hrLineDimTag = new Gtk.TextTag({
+            name: 'hr-line-dim',
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.4),
+        });
+        tagTable.add(hrLineDimTag);
     }
     
     _setupSignals() {
@@ -1374,13 +1399,22 @@ class MarkdownRenderer {
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
          'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'todo-checked-text', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
-         'table-pipe', 'table-separator', 'table-header', 'table-cell'];
+         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'hr-line', 'hr-line-dim'];
         
-        // Add gradient background tags to removal list for all moods
-        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
+        // Add gradient background tags to removal list for all moods (including custom ones)
+        let moodNamesToRemove = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
                           'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
                           'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
-        for (const moodName of moodNames) {
+        
+        // If we have existing mood names, add them to removal list
+        if (this.moodNames && this.moodNames.length > 0) {
+            moodNamesToRemove = moodNamesToRemove.concat(this.moodNames);
+        }
+        
+        // Remove duplicates
+        moodNamesToRemove = [...new Set(moodNamesToRemove)];
+        
+        for (const moodName of moodNamesToRemove) {
             for (let level = 1; level <= 6; level++) {
                 for (let i = 0; i < 30; i++) {
                     tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
@@ -1482,6 +1516,23 @@ class MarkdownRenderer {
                 this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
             }
             // Don't return - continue to apply inline formatting to header content
+        }
+        
+        // Horizontal rule: 3 or more dashes on their own line (with optional surrounding whitespace)
+        const hrMatch = line.match(/^(\s*)(---+)(\s*)$/);
+        if (hrMatch) {
+            const [, leadingSpace, dashes, trailingSpace] = hrMatch;
+            const dashesStart = lineOffset + leadingSpace.length;
+            const dashesEnd = dashesStart + dashes.length;
+            
+            const dashesStartIter = this.buffer.get_iter_at_offset(dashesStart);
+            const dashesEndIter = this.buffer.get_iter_at_offset(dashesEnd);
+            
+            // Apply default styling (will be overridden by cursor-aware version)
+            this._applyTag('hr-line', dashesStartIter, dashesEndIter);
+            
+            // Don't process this line further for other patterns
+            return;
         }
         
         // Bullet points (must be at start of line or after whitespace)
@@ -1839,8 +1890,6 @@ class MarkdownRenderer {
         const cursorIter = this.buffer.get_iter_at_mark(cursor);
         const cursorOffset = cursorIter.get_offset();
         
-        print(`_updateSyntaxVisibility called, cursor at offset: ${cursorOffset}`);
-        
         // Get all text
         const [start, end] = this.buffer.get_bounds();
         const text = this.buffer.get_text(start, end, false);
@@ -1981,6 +2030,28 @@ class MarkdownRenderer {
                 this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
             }
             // Don't return - continue to apply inline formatting to header content
+        }
+        
+        // Horizontal rule: 3 or more dashes on their own line (with optional surrounding whitespace)
+        const hrMatch = line.match(/^(\s*)(---+)(\s*)$/);
+        if (hrMatch) {
+            const [, leadingSpace, dashes, trailingSpace] = hrMatch;
+            const dashesStart = lineOffset + leadingSpace.length;
+            const dashesEnd = dashesStart + dashes.length;
+            
+            const dashesStartIter = this.buffer.get_iter_at_offset(dashesStart);
+            const dashesEndIter = this.buffer.get_iter_at_offset(dashesEnd);
+            
+            if (cursorOnLine) {
+                // Cursor is on the line - show dashes with dim styling
+                this._applyTag('hr-line-dim', dashesStartIter, dashesEndIter);
+            } else {
+                // Cursor is away - show as full-width line with strikethrough effect
+                this._applyTag('hr-line', dashesStartIter, dashesEndIter);
+            }
+            
+            // Don't process this line further for other patterns
+            return;
         }
         
         // Bullet points - handle * and - bullets
