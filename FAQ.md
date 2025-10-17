@@ -9,8 +9,8 @@
 - **Ctrl+0**: Reset zoom
 - **Ctrl+X**: Cut line (when no selection)
 - **Ctrl+Up/Down**: Move line up/down
-- **Tab**: Indent bullet point
-- **Shift+Tab**: Outdent bullet point
+- **Tab**: Indent bullet point / Increase header level
+- **Shift+Tab**: Outdent bullet point / Decrease header level
 
 ### Settings
 
@@ -47,6 +47,8 @@ metal, cobalt, fire, forest, lava, mint, amber, ocean, solar, cryo, stone, ice, 
 ######## Markdown Syntax
 
 - **Headers**: # H1, ## H2, ### H3, etc.
+  - Use **Tab** to increase header level (add a #)
+  - Use **Shift+Tab** to decrease header level (remove a #)
 - **Bold**: **text** or __text__
 - **Italic**: *text* or _text_
 - **Code**: `code`
@@ -55,6 +57,8 @@ metal, cobalt, fire, forest, lava, mint, amber, ocean, solar, cryo, stone, ice, 
 - **Underline**: ++text++
 - **Links**: [text](url)
 - **Bullets**: - item or * item
+  - Use **Tab** to indent bullets
+  - Use **Shift+Tab** to outdent bullets
 - **Todos**: [ ] unchecked or [X] checked
 
 ###### Where are my notes saved?
