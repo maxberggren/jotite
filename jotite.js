@@ -714,6 +714,8 @@ class MarkdownRenderer {
         this._textJustChanged = false; // Track if text was recently changed
         this._appliedTags = new Set(); // Track which tags we actually applied (Optimization #1)
         this._searchMode = false; // Track if we're in search mode to avoid interfering with selections
+        this._isUndoRedoOperation = false; // Track if we're in an undo/redo operation
+        this._undoRedoResetTimeoutId = null; // Track timeout for resetting undo/redo flag
         
         this._initTags();
         this._setupSignals();
@@ -1214,7 +1216,7 @@ class MarkdownRenderer {
     }
     
     _setupSignals() {
-        // Update on text changes with debouncing (50ms delay, or immediate for headers)
+        // Update on text changes with debouncing (50ms delay, or immediate for headers/undo/redo)
         this.buffer.connect('changed', () => {
             if (!this.updating) {
                 // Mark that text just changed to prevent cursor flicker
@@ -1237,10 +1239,26 @@ class MarkdownRenderer {
                     GLib.source_remove(this._renderTimeoutId);
                 }
                 
-                if (isHeader) {
-                    // For headers, render immediately
+                // Render immediately for headers or undo/redo operations
+                if (isHeader || this._isUndoRedoOperation) {
+                    // For headers and undo/redo, render immediately
                     this._updateSyntaxVisibility();
                     this._renderTimeoutId = null;
+                    
+                    // Reset undo/redo flag after a small delay to handle multiple buffer changes
+                    if (this._isUndoRedoOperation) {
+                        // Cancel any existing reset timeout
+                        if (this._undoRedoResetTimeoutId) {
+                            GLib.source_remove(this._undoRedoResetTimeoutId);
+                        }
+                        // Use a small delay in case the undo/redo triggers multiple changes
+                        this._undoRedoResetTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
+                            this._isUndoRedoOperation = false;
+                            this._undoRedoResetTimeoutId = null;
+                            return false;
+                        });
+                    }
+                    
                     // Reset the flag after a short delay to allow cursor updates again
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
                         this._textJustChanged = false;
@@ -3001,6 +3019,17 @@ class JotWindow extends Adw.ApplicationWindow {
         const keyController = new Gtk.EventControllerKey();
         
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            // Detect undo/redo operations (Ctrl+Z and Ctrl+Shift+Z)
+            if (keyval === 122 && (state & CTRL_MASK)) { // 'z' key
+                // Set flag to indicate undo/redo operation
+                // The flag will be reset in _setupSignals after the render completes
+                if (this._markdownRenderer) {
+                    this._markdownRenderer._isUndoRedoOperation = true;
+                }
+                // Let the default undo/redo handler process it
+                return false;
+            }
+            
             // Get current position and line
             const cursor = buffer.get_insert();
             const iter = buffer.get_iter_at_mark(cursor);
@@ -3040,6 +3069,19 @@ class JotWindow extends Adw.ApplicationWindow {
                 if (bulletMatch) {
                     print('Bullet line detected!');
                     const [, indent, bullet, content] = bulletMatch;
+                    
+                    // Check if cursor is at the end of the line using line offset
+                    const cursorLineOffset = iter.get_line_offset();
+                    const lineLength = lineText.length;
+                    const isCursorAtEnd = cursorLineOffset === lineLength;
+                    
+                    print(`Cursor position: ${cursorLineOffset}, Line length: ${lineLength}, At end: ${isCursorAtEnd}`);
+                    
+                    // Only handle bullet behavior if cursor is at the end of the line
+                    if (!isCursorAtEnd) {
+                        print('Cursor not at end of line, allowing default Enter behavior');
+                        return false;
+                    }
                     
                     // Check if this is a todo item (has [ ] or [X] or [x])
                     const hasTodo = content.match(/^\[([ Xx])\]\s*/);
