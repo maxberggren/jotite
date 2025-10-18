@@ -30,6 +30,7 @@ yay -S jotite
 - **Ctrl+Shift+S** - Save As (choose location)
 - **Ctrl+N** - New file
 - **Ctrl+O** - Open file
+- **Ctrl+T** - Toggle TODO checkbox on current line
 - **Ctrl+X** - Cut entire line (when no selection)
 - **Ctrl+Up/Down** - Move current line up/down
 - **Ctrl+Plus/Minus** - Zoom in/out
@@ -37,6 +38,7 @@ yay -S jotite
 - **Escape** - Close application
 - **Tab/Shift+Tab** - Indent/outdent bullets
 - **Enter** - Auto-continue bullet lists
+- **Double-click** - Toggle TODO box status ([ ] ↔ [X])
 
 ### Manual Installation (All Distributions)
 

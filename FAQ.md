@@ -4,6 +4,7 @@
 - **Ctrl+Shift+S**: Save As
 - **Ctrl+N**: New note
 - **Ctrl+O**: Open note
+- **Ctrl+T**: Toggle TODO checkbox on current line
 - **Ctrl+Plus**: Zoom in
 - **Ctrl+Minus**: Zoom out
 - **Ctrl+0**: Reset zoom
@@ -60,6 +61,8 @@ metal, cobalt, fire, forest, lava, mint, amber, ocean, solar, cryo, stone, ice, 
   - Use **Tab** to indent bullets
   - Use **Shift+Tab** to outdent bullets
 - **Todos**: [ ] unchecked or [X] checked
+  - **Double-click** a TODO box to toggle its status
+  - Use **Ctrl+T** to toggle TODO on the current line
 
 ###### Where are my notes saved?
 
