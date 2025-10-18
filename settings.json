@@ -1,0 +1,47 @@
+{
+  "notesPath": "~/Documents/Jotite",
+  "headerMoods": [
+    "metal",
+    "cobalt",
+    "fire",
+    "forest",
+    "lava",
+    "mint",
+    "amber",
+    "ocean",
+    "solar",
+    "cryo",
+    "stone",
+    "ice",
+    "purple",
+    "sunset",
+    "royal",
+    "aurora",
+    "sunken",
+    "ghost",
+    "sulfur",
+    "velvet",
+    "cicada",
+    "lunar",
+    "tonic",
+    "ectoplasm",
+    "polar",
+    "chiaroscuro",
+    "vanta",
+    "toxicvelvet",
+    "bruise",
+    "bismuth",
+    "ultralich",
+    "paradox",
+    "hazmat",
+    "feral",
+    "RGBmood"
+  ],
+  "customMoods": {
+    "RGBmood": [
+      "#FF0000",
+      "#00FF00",
+      "#0000FF"
+    ]
+  }
+}

@@ -13,11 +13,15 @@ const FEEDBACK_TIMEOUT_MS = 3000;
 
 // Keyboard constants
 const KEY_ENTER = 65293;
+const KEY_KP_ENTER = 65421;  // Numpad Enter key
 const KEY_S = 115;
 const KEY_S_UPPER = 83;  // 'S' key (with shift)
 const KEY_N = 110;       // 'n' key
 const KEY_O = 111;       // 'o' key
 const KEY_X = 120;       // 'x' key
+const KEY_F = 102;       // 'f' key
+const KEY_G = 103;       // 'g' key
+const KEY_ESCAPE = 65307; // Escape key
 const KEY_PLUS = 61;     // '+' key (also '=' key without shift)
 const KEY_MINUS = 45;    // '-' key
 const KEY_0 = 48;        // '0' key
@@ -30,6 +34,184 @@ const ALT_MASK = 8;
 // File patterns
 const FILE_PATTERNS = ['*.md', '*.txt'];
 const FILE_FILTER_NAME = 'Text files (*.md, *.txt)';
+
+// ============================================================================
+// Settings Manager
+// ============================================================================
+
+class SettingsManager {
+    constructor() {
+        this.settings = this._loadSettings();
+        this.monitor = null;
+    }
+
+    _getAppDirectory() {
+        // Try to find the application directory (where the script is installed)
+        let appDir = null;
+        
+        if (imports.system.programInvocationName) {
+            const invocationPath = imports.system.programInvocationName;
+            if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
+                appDir = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
+            }
+        }
+        if (!appDir) {
+            appDir = GLib.path_get_dirname(imports.system.programPath);
+        }
+        
+        // If installed to /usr/bin or /usr/local/bin, look for data files in /usr/share/jotite
+        if (appDir === '/usr/bin' || appDir === '/usr/local/bin') {
+            const systemDataDir = appDir === '/usr/bin' ? '/usr/share/jotite' : '/usr/local/share/jotite';
+            const systemDataDirFile = Gio.File.new_for_path(systemDataDir);
+            if (systemDataDirFile.query_exists(null)) {
+                return systemDataDir;
+            }
+        }
+        
+        return appDir;
+    }
+
+    _ensureConfigDirectory() {
+        const configDir = GLib.build_filenamev([GLib.get_home_dir(), '.config', 'jotite']);
+        const configDirFile = Gio.File.new_for_path(configDir);
+        
+        if (!configDirFile.query_exists(null)) {
+            try {
+                configDirFile.make_directory_with_parents(null);
+                print(`Created config directory: ${configDir}`);
+                
+                // Copy default files from app directory
+                const appDir = this._getAppDirectory();
+                
+                // Copy settings.json
+                const srcSettingsPath = GLib.build_filenamev([appDir, 'settings.json']);
+                const srcSettingsFile = Gio.File.new_for_path(srcSettingsPath);
+                const dstSettingsPath = GLib.build_filenamev([configDir, 'settings.json']);
+                const dstSettingsFile = Gio.File.new_for_path(dstSettingsPath);
+                
+                if (srcSettingsFile.query_exists(null)) {
+                    srcSettingsFile.copy(dstSettingsFile, Gio.FileCopyFlags.NONE, null, null);
+                    print(`Copied settings.json from ${srcSettingsPath}`);
+                }
+                
+                // Copy FAQ.md
+                const srcFaqPath = GLib.build_filenamev([appDir, 'FAQ.md']);
+                const srcFaqFile = Gio.File.new_for_path(srcFaqPath);
+                const dstFaqPath = GLib.build_filenamev([configDir, 'FAQ.md']);
+                const dstFaqFile = Gio.File.new_for_path(dstFaqPath);
+                
+                if (srcFaqFile.query_exists(null)) {
+                    srcFaqFile.copy(dstFaqFile, Gio.FileCopyFlags.NONE, null, null);
+                    print(`Copied FAQ.md from ${srcFaqPath}`);
+                }
+            } catch (e) {
+                print(`Warning: Error setting up config directory: ${e.message}`);
+            }
+        }
+        
+        return configDir;
+    }
+
+    _getSettingsPath() {
+        const configDir = this._ensureConfigDirectory();
+        return GLib.build_filenamev([configDir, 'settings.json']);
+    }
+
+    _getDefaultSettings() {
+        return {
+            theme: 'default',
+            fontSize: 15,
+            fontFamily: 'monospace',
+            autoSave: false,
+            headerMoods: [
+                'metal', 'cobalt', 'fire', 'forest', 'lava', 'mint', 
+                'amber', 'ocean', 'solar', 'cryo', 'stone', 'ice', 
+                'purple', 'sunset', 'royal', 'aurora', 'sunken', 'ghost', 
+                'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'ectoplasm', 
+                'polar', 'chiaroscuro', 'vanta', 'toxicvelvet', 'bruise', 
+                'bismuth', 'ultralich', 'paradox', 'hazmat', 'feral'
+            ],
+            customMoods: {
+                // Example: 'myCustomMood': ['#FF0000', '#00FF00', '#0000FF']
+            }
+        };
+    }
+
+    _loadSettings() {
+        let text = null;
+        try {
+            const settingsPath = this._getSettingsPath();
+            const file = Gio.File.new_for_path(settingsPath);
+            
+            if (!file.query_exists(null)) {
+                print('Settings file does not exist, using defaults');
+                return this._getDefaultSettings();
+            }
+
+            const [success, contents] = file.load_contents(null);
+            if (!success) {
+                print('Failed to load settings file');
+                return this._getDefaultSettings();
+            }
+
+            text = new TextDecoder().decode(contents);
+            
+            // Strip single-line comments (// comments)
+            text = text.replace(/\/\/.*$/gm, '');
+            
+            // Strip multi-line comments (/* comments */)
+            text = text.replace(/\/\*[\s\S]*?\*\//g, '');
+            
+            // Strip trailing commas before } or ]
+            text = text.replace(/,(\s*[}\]])/g, '$1');
+            
+            const settings = JSON.parse(text);
+            print(`Loaded settings: headerMoods length = ${settings.headerMoods ? settings.headerMoods.length : 'none'}`);
+            
+            // Merge with defaults to ensure all keys exist
+            const defaults = this._getDefaultSettings();
+            return Object.assign({}, defaults, settings);
+        } catch (e) {
+            print(`Error loading settings: ${e.message}`);
+            if (text) {
+                print(`Settings text was: ${text.substring(0, 200)}...`);
+            }
+            return this._getDefaultSettings();
+        }
+    }
+
+    setupMonitor(callback) {
+        try {
+            const settingsPath = this._getSettingsPath();
+            const file = Gio.File.new_for_path(settingsPath);
+            
+            this.monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
+            this.monitor.connect('changed', (monitor, file, otherFile, eventType) => {
+                print(`Settings file event: ${eventType}`);
+                // CHANGES_DONE_HINT = 0, DELETED = 1, CREATED = 2, ATTRIBUTE_CHANGED = 3, 
+                // PRE_UNMOUNT = 4, UNMOUNTED = 5, MOVED = 6, RENAMED = 7, MOVED_IN = 8, MOVED_OUT = 9
+                if (eventType === Gio.FileMonitorEvent.CHANGES_DONE_HINT || 
+                    eventType === Gio.FileMonitorEvent.CREATED ||
+                    eventType === Gio.FileMonitorEvent.ATTRIBUTE_CHANGED) {
+                    print('Settings file changed, reloading...');
+                    // Add a small delay to ensure file write is complete
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                        this.settings = this._loadSettings();
+                        callback();
+                        return false;
+                    });
+                }
+            });
+            print('Monitoring settings file for changes');
+        } catch (e) {
+            print(`Failed to setup settings monitor: ${e.message}`);
+        }
+    }
+
+    get(key) {
+        return this.settings[key];
+    }
+}
 
 // ============================================================================
 // Theme Manager
@@ -243,6 +425,40 @@ class ThemeManager {
                 opacity: 0.3;
                 font-size: 12px;
             }
+            
+            .status-label:hover {
+                opacity: 0.5;
+            }
+
+            .status-button {
+                padding: 0px 4px;
+                margin: 0px;
+                border: none;
+                background: transparent;
+                color: ${c.white};
+                opacity: 0.3;
+                font-size: 12px;
+                font-weight: 400;
+                min-width: 0;
+                min-height: 0;
+                line-height: 1;
+            }
+
+            .status-button > * {
+                margin: 0;
+                padding: 0;
+            }
+
+            .status-button:hover {
+                opacity: 0.6;
+                background: transparent;
+            }
+
+            .status-button-large {
+                font-size: 20px;
+                line-height: 0.8;
+                padding: 0px;
+            }
 
             .jot-hash {
                 color: ${c.white};
@@ -399,6 +615,83 @@ class ThemeManager {
             menuitem:hover {
                 background: ${c.blue};
             }
+
+            /* Search bar styling - match status bar */
+            searchbar {
+                background: transparent;
+                background-color: transparent;
+                background-image: none;
+                border-bottom: 1px solid ${hexToRgba(c.white, 0.2)};
+                padding: 0;
+            }
+            
+            searchbar > revealer > box {
+                background: transparent;
+                background-color: transparent;
+            }
+
+            .search-entry {
+                background: transparent;
+                color: ${c.white};
+                border: 1px solid ${hexToRgba(c.white, 0.2)};
+                border-radius: 0;
+                padding: 4px 6px;
+                min-width: 200px;
+                font-size: 12px;
+                min-height: 0;
+            }
+
+            .search-entry:focus {
+                border-color: ${hexToRgba(c.white, 0.4)};
+                outline: none;
+            }
+
+            .search-button {
+                padding: 0px 6px;
+                margin: 0px;
+                border: 1px solid ${hexToRgba(c.white, 0.1)};
+                border-radius: 0;
+                background: transparent;
+                color: ${c.white};
+                opacity: 0.3;
+                font-size: 12px;
+                font-weight: 400;
+                min-width: 0;
+                min-height: 0;
+            }
+
+            .search-button:hover {
+                opacity: 0.6;
+                background: transparent;
+            }
+            
+            button.search-button:checked {
+                border: 1px solid ${c.white};
+                opacity: 1.0;
+            }
+
+            .search-match-label {
+                color: ${c.white};
+                opacity: 0.3;
+                font-size: 12px;
+                margin: 0;
+                padding: 0;
+                min-width: 0;
+            }
+            
+            .search-match-label:empty {
+                min-width: 0;
+                padding: 0;
+                margin: 0;
+            }
+
+            .search-match-highlight {
+                background: ${hexToRgba(c.yellow, 0.3)};
+            }
+
+            .search-current-match {
+                background: ${hexToRgba(c.blue, 0.5)};
+            }
         `;
     }
 }
@@ -408,10 +701,11 @@ class ThemeManager {
 // ============================================================================
 
 class MarkdownRenderer {
-    constructor(textView, colors) {
+    constructor(textView, colors, moodConfig = null) {
         this.textView = textView;
         this.buffer = textView.get_buffer();
         this.colors = colors;
+        this.moodConfig = moodConfig || this._getDefaultMoods();
         this.updating = false;
         this.lastCursorPosition = -1;
         this._previousCursorPosition = -1; // Track position from previous update for arrow direction
@@ -419,9 +713,51 @@ class MarkdownRenderer {
         this._cursorTimeoutId = null;
         this._textJustChanged = false; // Track if text was recently changed
         this._appliedTags = new Set(); // Track which tags we actually applied (Optimization #1)
+        this._searchMode = false; // Track if we're in search mode to avoid interfering with selections
+        this._isUndoRedoOperation = false; // Track if we're in an undo/redo operation
+        this._undoRedoResetTimeoutId = null; // Track timeout for resetting undo/redo flag
         
         this._initTags();
         this._setupSignals();
+    }
+    
+    _getDefaultMoods() {
+        return {
+            metal: { colors: ['#4A5568', '#CBD5E0'] },
+            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
+            fire: { colors: ['#FF4500', '#FFD700'] },
+            forest: { colors: ['#228B22', '#90EE90'] },
+            lava: { colors: ['#8B0000', '#FF4500'] },
+            mint: { colors: ['#00C9A7', '#C7FFED'] },
+            amber: { colors: ['#FF8C00', '#FFE4B5'] },
+            ocean: { colors: ['#006994', '#63B8FF'] },
+            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
+            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
+            stone: { colors: ['#708090', '#B0B8C0'] },
+            ice: { colors: ['#00CED1', '#E0FFFF'] },
+            purple: { colors: ['#6A0DAD', '#DA70D6'] },
+            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
+            royal: { colors: ['#4169E1', '#B0C4DE'] },
+            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
+            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
+            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
+            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
+            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
+            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
+            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
+            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
+            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
+            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
+            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
+            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
+            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
+            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
+            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
+            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
+            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
+            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
+            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
+        };
     }
     
     _lightenColor(color, percent = 10) {
@@ -459,23 +795,62 @@ class MarkdownRenderer {
         return rgba;
     }
     
+    _isEmoji(char) {
+        // Check if character is an emoji based on Unicode ranges
+        const codePoint = char.codePointAt(0);
+        if (!codePoint) return false;
+        
+        // Common emoji ranges
+        return (
+            (codePoint >= 0x1F600 && codePoint <= 0x1F64F) || // Emoticons
+            (codePoint >= 0x1F300 && codePoint <= 0x1F5FF) || // Misc Symbols and Pictographs
+            (codePoint >= 0x1F680 && codePoint <= 0x1F6FF) || // Transport and Map
+            (codePoint >= 0x1F1E0 && codePoint <= 0x1F1FF) || // Regional flags
+            (codePoint >= 0x2600 && codePoint <= 0x26FF) ||   // Misc symbols
+            (codePoint >= 0x2700 && codePoint <= 0x27BF) ||   // Dingbats
+            (codePoint >= 0xFE00 && codePoint <= 0xFE0F) ||   // Variation Selectors
+            (codePoint >= 0x1F900 && codePoint <= 0x1F9FF) || // Supplemental Symbols and Pictographs
+            (codePoint >= 0x1FA00 && codePoint <= 0x1FA6F) || // Chess Symbols
+            (codePoint >= 0x1FA70 && codePoint <= 0x1FAFF) || // Symbols and Pictographs Extended-A
+            (codePoint >= 0x231A && codePoint <= 0x231B) ||   // Watch
+            (codePoint >= 0x23E9 && codePoint <= 0x23F3) ||   // Arrows
+            (codePoint >= 0x25AA && codePoint <= 0x25AB) ||   // Squares
+            (codePoint >= 0x25B6 && codePoint <= 0x25C0) ||   // Triangles
+            (codePoint >= 0x25FB && codePoint <= 0x25FE) ||   // Squares
+            (codePoint >= 0x2B50 && codePoint <= 0x2B55) ||   // Stars
+            (codePoint >= 0x203C && codePoint <= 0x3299)      // Various symbols
+        );
+    }
+    
     _initTags() {
         const tagTable = this.buffer.get_tag_table();
         
         // Remove existing tags if they exist
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
+         'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
          'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'bullet-star', 'bullet-star-near', 
          'bullet-margin', 'sub-bullet-margin', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
          'todo-unchecked-inside', 'todo-checked-inside', 'todo-checked-text',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
-         'table-pipe', 'table-separator', 'table-header', 'table-cell'];
+         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'search-highlight', 'search-current',
+         'hr-line', 'hr-line-dim'];
         
-        // Add gradient background tags to removal list for all moods
-        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
+        // Add gradient background tags to removal list for all moods (including custom ones)
+        // Use existing mood names from this.moodConfig if available, otherwise use defaults
+        let moodNamesToRemove = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
                           'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
                           'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
-        for (const moodName of moodNames) {
+        
+        // If we have existing mood config, add all its mood names to removal list
+        if (this.moodConfig && Object.keys(this.moodConfig).length > 0) {
+            moodNamesToRemove = moodNamesToRemove.concat(Object.keys(this.moodConfig));
+        }
+        
+        // Remove duplicates
+        moodNamesToRemove = [...new Set(moodNamesToRemove)];
+        
+        for (const moodName of moodNamesToRemove) {
             for (let level = 1; level <= 6; level++) {
                 for (let i = 0; i < 30; i++) {
                     tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
@@ -560,43 +935,20 @@ class MarkdownRenderer {
             tagTable.add(tag);
         }
         
-        // Define color moods with gradient palettes (2 or 3 colors) - in custom order
-        const moods = {
-            metal: { colors: ['#4A5568', '#CBD5E0'] },
-            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
-            fire: { colors: ['#FF4500', '#FFD700'] },
-            forest: { colors: ['#228B22', '#90EE90'] },
-            lava: { colors: ['#8B0000', '#FF4500'] },
-            mint: { colors: ['#00C9A7', '#C7FFED'] },
-            amber: { colors: ['#FF8C00', '#FFE4B5'] },
-            ocean: { colors: ['#006994', '#63B8FF'] },
-            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
-            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
-            stone: { colors: ['#708090', '#B0B8C0'] },
-            ice: { colors: ['#00CED1', '#E0FFFF'] },
-            purple: { colors: ['#6A0DAD', '#DA70D6'] },
-            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
-            royal: { colors: ['#4169E1', '#B0C4DE'] },
-            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
-            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
-            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
-            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
-            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
-            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
-            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
-            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
-            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
-            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
-            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
-            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
-            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
-            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
-            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
-            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
-            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
-            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
-            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
-        };
+        // Emoji tags for headers: emojis need smaller scale to match pixel font size
+        // Emojis are significantly larger than pixel fonts, so scale them down by ~0.60
+        const emojiScales = scales.map(s => s * 0.60);
+        for (let i = 1; i <= 6; i++) {
+            const tag = new Gtk.TextTag({
+                name: `emoji-h${i}`,
+                scale: emojiScales[i-1],
+                weight: 400,
+            });
+            tagTable.add(tag);
+        }
+        
+        // Use moods from configuration (this.moodConfig is set in constructor)
+        const moods = this.moodConfig;
         
         this.moodNames = Object.keys(moods);
         this.moodGradients = {};
@@ -622,65 +974,50 @@ class MarkdownRenderer {
             const gradientColors = [];
             const palette = moodData.colors.map(parseColor);
             
-            if (palette.length === 2) {
-                // 2-color gradient: there and back
-                const halfSteps = Math.floor(steps / 2);
+            if (palette.length === 0) {
+                // No colors defined, skip this mood
+                print(`Warning: Mood "${moodName}" has no colors defined`);
+                continue;
+            } else if (palette.length === 1) {
+                // 1-color mood: use the same color for all steps
+                const color = toHex(palette[0].r, palette[0].g, palette[0].b);
+                for (let i = 0; i < steps; i++) {
+                    gradientColors.push(color);
+                }
+            } else {
+                // N-color gradient (N >= 2): create a smooth loop through all colors and back
+                // For N colors, we have (N-1)*2 segments to create a complete loop
+                const numSegments = (palette.length - 1) * 2;
+                const segmentSteps = Math.floor(steps / numSegments);
                 
-                // First half: color 0 to color 1
-                for (let i = 0; i < halfSteps; i++) {
-                    const ratio = i / (halfSteps - 1);
-                    const r = Math.round(palette[0].r + (palette[1].r - palette[0].r) * ratio);
-                    const g = Math.round(palette[0].g + (palette[1].g - palette[0].g) * ratio);
-                    const b = Math.round(palette[0].b + (palette[1].b - palette[0].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
+                // Helper function to interpolate between two colors
+                const interpolateColors = (color1, color2, ratio) => {
+                    const r = Math.round(color1.r + (color2.r - color1.r) * ratio);
+                    const g = Math.round(color1.g + (color2.g - color1.g) * ratio);
+                    const b = Math.round(color1.b + (color2.b - color1.b) * ratio);
+                    return toHex(r, g, b);
+                };
+                
+                // Forward pass: go through all colors 0->1->2->...->N-1
+                for (let segmentIdx = 0; segmentIdx < palette.length - 1; segmentIdx++) {
+                    const startColor = palette[segmentIdx];
+                    const endColor = palette[segmentIdx + 1];
+                    
+                    for (let i = 0; i < segmentSteps; i++) {
+                        const ratio = i / (segmentSteps - 1 || 1);
+                        gradientColors.push(interpolateColors(startColor, endColor, ratio));
+                    }
                 }
                 
-                // Second half: color 1 back to color 0
-                for (let i = 0; i < halfSteps; i++) {
-                    const ratio = i / (halfSteps - 1);
-                    const r = Math.round(palette[1].r + (palette[0].r - palette[1].r) * ratio);
-                    const g = Math.round(palette[1].g + (palette[0].g - palette[1].g) * ratio);
-                    const b = Math.round(palette[1].b + (palette[0].b - palette[1].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-            } else if (palette.length === 3) {
-                // 3-color gradient: 0->1->2->1->0 for smooth looping
-                const segmentSteps = Math.floor(steps / 4);
-                
-                // Segment 1: color 0 to color 1
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[0].r + (palette[1].r - palette[0].r) * ratio);
-                    const g = Math.round(palette[0].g + (palette[1].g - palette[0].g) * ratio);
-                    const b = Math.round(palette[0].b + (palette[1].b - palette[0].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-                
-                // Segment 2: color 1 to color 2
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[1].r + (palette[2].r - palette[1].r) * ratio);
-                    const g = Math.round(palette[1].g + (palette[2].g - palette[1].g) * ratio);
-                    const b = Math.round(palette[1].b + (palette[2].b - palette[1].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-                
-                // Segment 3: color 2 back to color 1
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[2].r + (palette[1].r - palette[2].r) * ratio);
-                    const g = Math.round(palette[2].g + (palette[1].g - palette[2].g) * ratio);
-                    const b = Math.round(palette[2].b + (palette[1].b - palette[2].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
-                }
-                
-                // Segment 4: color 1 back to color 0
-                for (let i = 0; i < segmentSteps; i++) {
-                    const ratio = i / (segmentSteps - 1 || 1);
-                    const r = Math.round(palette[1].r + (palette[0].r - palette[1].r) * ratio);
-                    const g = Math.round(palette[1].g + (palette[0].g - palette[1].g) * ratio);
-                    const b = Math.round(palette[1].b + (palette[0].b - palette[1].b) * ratio);
-                    gradientColors.push(toHex(r, g, b));
+                // Backward pass: go back through all colors N-1->...->2->1->0
+                for (let segmentIdx = palette.length - 1; segmentIdx > 0; segmentIdx--) {
+                    const startColor = palette[segmentIdx];
+                    const endColor = palette[segmentIdx - 1];
+                    
+                    for (let i = 0; i < segmentSteps; i++) {
+                        const ratio = i / (segmentSteps - 1 || 1);
+                        gradientColors.push(interpolateColors(startColor, endColor, ratio));
+                    }
                 }
             }
             
@@ -847,10 +1184,39 @@ class MarkdownRenderer {
             name: 'table-cell',
         });
         tagTable.add(tableCellTag);
+        
+        // Search highlight tags
+        const searchHighlightTag = new Gtk.TextTag({
+            name: 'search-highlight',
+            background_rgba: this._colorWithOpacity(this.colors.yellow, 0.3),
+        });
+        tagTable.add(searchHighlightTag);
+        
+        const searchCurrentTag = new Gtk.TextTag({
+            name: 'search-current',
+            background_rgba: this._colorWithOpacity(this.colors.blue, 0.5),
+        });
+        tagTable.add(searchCurrentTag);
+        
+        // Horizontal rule: full-width line (when cursor is away)
+        const hrLineTag = new Gtk.TextTag({
+            name: 'hr-line',
+            foreground: this.colors.background, // Make text invisible by matching background
+            strikethrough: true,
+            strikethrough_rgba: this._colorWithOpacity(this.colors.foreground, 0.3), // Visible line through the middle
+        });
+        tagTable.add(hrLineTag);
+        
+        // Horizontal rule: dim dashes (when cursor is on line)
+        const hrLineDimTag = new Gtk.TextTag({
+            name: 'hr-line-dim',
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.4),
+        });
+        tagTable.add(hrLineDimTag);
     }
     
     _setupSignals() {
-        // Update on text changes with debouncing (50ms delay, or immediate for headers)
+        // Update on text changes with debouncing (50ms delay, or immediate for headers/undo/redo)
         this.buffer.connect('changed', () => {
             if (!this.updating) {
                 // Mark that text just changed to prevent cursor flicker
@@ -873,10 +1239,26 @@ class MarkdownRenderer {
                     GLib.source_remove(this._renderTimeoutId);
                 }
                 
-                if (isHeader) {
-                    // For headers, render immediately
+                // Render immediately for headers or undo/redo operations
+                if (isHeader || this._isUndoRedoOperation) {
+                    // For headers and undo/redo, render immediately
                     this._updateSyntaxVisibility();
                     this._renderTimeoutId = null;
+                    
+                    // Reset undo/redo flag after a small delay to handle multiple buffer changes
+                    if (this._isUndoRedoOperation) {
+                        // Cancel any existing reset timeout
+                        if (this._undoRedoResetTimeoutId) {
+                            GLib.source_remove(this._undoRedoResetTimeoutId);
+                        }
+                        // Use a small delay in case the undo/redo triggers multiple changes
+                        this._undoRedoResetTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
+                            this._isUndoRedoOperation = false;
+                            this._undoRedoResetTimeoutId = null;
+                            return false;
+                        });
+                    }
+                    
                     // Reset the flag after a short delay to allow cursor updates again
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
                         this._textJustChanged = false;
@@ -900,7 +1282,7 @@ class MarkdownRenderer {
         
         // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
         this.buffer.connect('notify::cursor-position', () => {
-            if (!this.updating && !this._textJustChanged) {
+            if (!this.updating && !this._textJustChanged && !this._searchMode) {
                 // Cancel previous timeout if exists
                 if (this._cursorTimeoutId) {
                     GLib.source_remove(this._cursorTimeoutId);
@@ -1042,10 +1424,10 @@ class MarkdownRenderer {
                 }
                 
                 // Check for headers at line start - only when moving forward
-                const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+                const headerMatch = line.match(/^(#{1,6})(\s+)(.+)$/);
                 if (headerMatch && posInLine <= headerMatch[1].length && movingForward) {
-                    // Jump past the hashes and space
-                    return (headerMatch[1].length + 1) - posInLine;
+                    // Jump past the hashes and all spaces
+                    return (headerMatch[1].length + headerMatch[2].length) - posInLine;
                 }
                 
                 // Check for code block markers - skip over them when moving forward
@@ -1073,15 +1455,25 @@ class MarkdownRenderer {
         // Remove syntax tags but preserve margin tags
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
+         'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
          'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'todo-checked-text', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
-         'table-pipe', 'table-separator', 'table-header', 'table-cell'];
+         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'hr-line', 'hr-line-dim'];
         
-        // Add gradient background tags to removal list for all moods
-        const moodNames = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
+        // Add gradient background tags to removal list for all moods (including custom ones)
+        let moodNamesToRemove = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
                           'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
                           'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
-        for (const moodName of moodNames) {
+        
+        // If we have existing mood names, add them to removal list
+        if (this.moodNames && this.moodNames.length > 0) {
+            moodNamesToRemove = moodNamesToRemove.concat(this.moodNames);
+        }
+        
+        // Remove duplicates
+        moodNamesToRemove = [...new Set(moodNamesToRemove)];
+        
+        for (const moodName of moodNamesToRemove) {
             for (let level = 1; level <= 6; level++) {
                 for (let i = 0; i < 30; i++) {
                     tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
@@ -1156,15 +1548,15 @@ class MarkdownRenderer {
     
     _applyLineMarkdown(line, lineOffset, lineNum) {
         // Headers (must be at start of line) - support any number of hashes
-        const headerMatch = line.match(/^(#{1,})\s+(.+)$/);
+        const headerMatch = line.match(/^(#{1,})(\s+)(.+)$/);
         if (headerMatch) {
-            const [, hashes, content] = headerMatch;
+            const [, hashes, spaces, content] = headerMatch;
             const actualLevel = hashes.length; // Actual number of hashes
             const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
             const start = this.buffer.get_iter_at_offset(lineOffset);
             
             // Hide the hashes by default (will be shown when cursor is on line)
-            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space
+            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + spaces.length);
             this._applyTag('invisible', start, hashEnd);
             
             // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
@@ -1173,15 +1565,53 @@ class MarkdownRenderer {
             const gradientColors = this.moodGradients[mood];
             
             // Apply gradient with 45-degree diagonal pattern
-            const contentStart = lineOffset + hashes.length + 1;
-            for (let i = 0; i < content.length; i++) {
+            // Calculate actual content start position accounting for all spaces
+            const contentStart = lineOffset + hashes.length + spaces.length;
+            
+            // Use Array.from to properly iterate Unicode code points (handles emojis correctly)
+            const chars = Array.from(content);
+            
+            // GTK TextBuffer counts each character (including emojis) as 1 position
+            for (let i = 0; i < chars.length; i++) {
+                const char = chars[i];
+                
+                // Each character is 1 position in GTK buffer (even emojis)
                 const charStart = this.buffer.get_iter_at_offset(contentStart + i);
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
+                
                 // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                
+                // Check if this is an emoji - emojis need special handling
+                const isEmoji = this._isEmoji(char);
+                
+                if (isEmoji) {
+                    // For emojis: only apply the emoji scale tag (not the gradient tag)
+                    // The emoji tag already has the correct scaled-down size
+                    this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
+                } else {
+                    // For regular text: apply the gradient tag with header scale
+                    this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                }
             }
             // Don't return - continue to apply inline formatting to header content
+        }
+        
+        // Horizontal rule: 3 or more dashes on their own line (with optional surrounding whitespace)
+        const hrMatch = line.match(/^(\s*)(---+)(\s*)$/);
+        if (hrMatch) {
+            const [, leadingSpace, dashes, trailingSpace] = hrMatch;
+            const dashesStart = lineOffset + leadingSpace.length;
+            const dashesEnd = dashesStart + dashes.length;
+            
+            const dashesStartIter = this.buffer.get_iter_at_offset(dashesStart);
+            const dashesEndIter = this.buffer.get_iter_at_offset(dashesEnd);
+            
+            // Apply default styling (will be overridden by cursor-aware version)
+            this._applyTag('hr-line', dashesStartIter, dashesEndIter);
+            
+            // Don't process this line further for other patterns
+            return;
         }
         
         // Bullet points (must be at start of line or after whitespace)
@@ -1539,8 +1969,6 @@ class MarkdownRenderer {
         const cursorIter = this.buffer.get_iter_at_mark(cursor);
         const cursorOffset = cursorIter.get_offset();
         
-        print(`_updateSyntaxVisibility called, cursor at offset: ${cursorOffset}`);
-        
         // Get all text
         const [start, end] = this.buffer.get_bounds();
         const text = this.buffer.get_text(start, end, false);
@@ -1648,15 +2076,15 @@ class MarkdownRenderer {
     
     _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine, lineNum) {
         // Headers (must be at start of line) - support any number of hashes
-        const headerMatch = line.match(/^(#{1,})\s+(.+)$/);
+        const headerMatch = line.match(/^(#{1,})(\s+)(.+)$/);
         if (headerMatch) {
-            const [, hashes, content] = headerMatch;
+            const [, hashes, spaces, content] = headerMatch;
             const actualLevel = hashes.length; // Actual number of hashes
             const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
             const start = this.buffer.get_iter_at_offset(lineOffset);
             
-            // Show/hide the hashes based on cursor position
-            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + 1); // +1 to include the space after #
+            // Show/hide the hashes and spaces based on cursor position
+            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + spaces.length);
             if (cursorOnLine) {
                 // Cursor is on this line - show hashes with level-specific dim tag
                 this._applyTag(`dim-h${styleLevel}`, start, hashEnd);
@@ -1671,15 +2099,58 @@ class MarkdownRenderer {
             const gradientColors = this.moodGradients[mood];
             
             // Apply gradient with 45-degree diagonal pattern
-            const contentStart = lineOffset + hashes.length + 1;
-            for (let i = 0; i < content.length; i++) {
+            // Calculate actual content start position accounting for all spaces
+            const contentStart = lineOffset + hashes.length + spaces.length;
+            
+            // Use Array.from to properly iterate Unicode code points (handles emojis correctly)
+            const chars = Array.from(content);
+            
+            // GTK TextBuffer counts each character (including emojis) as 1 position
+            for (let i = 0; i < chars.length; i++) {
+                const char = chars[i];
+                
+                // Each character is 1 position in GTK buffer (even emojis)
                 const charStart = this.buffer.get_iter_at_offset(contentStart + i);
                 const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
+                
                 // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                
+                // Check if this is an emoji - emojis need special handling
+                const isEmoji = this._isEmoji(char);
+                
+                if (isEmoji) {
+                    // For emojis: only apply the emoji scale tag (not the gradient tag)
+                    // The emoji tag already has the correct scaled-down size
+                    this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
+                } else {
+                    // For regular text: apply the gradient tag with header scale
+                    this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                }
             }
             // Don't return - continue to apply inline formatting to header content
+        }
+        
+        // Horizontal rule: 3 or more dashes on their own line (with optional surrounding whitespace)
+        const hrMatch = line.match(/^(\s*)(---+)(\s*)$/);
+        if (hrMatch) {
+            const [, leadingSpace, dashes, trailingSpace] = hrMatch;
+            const dashesStart = lineOffset + leadingSpace.length;
+            const dashesEnd = dashesStart + dashes.length;
+            
+            const dashesStartIter = this.buffer.get_iter_at_offset(dashesStart);
+            const dashesEndIter = this.buffer.get_iter_at_offset(dashesEnd);
+            
+            if (cursorOnLine) {
+                // Cursor is on the line - show dashes with dim styling
+                this._applyTag('hr-line-dim', dashesStartIter, dashesEndIter);
+            } else {
+                // Cursor is away - show as full-width line with strikethrough effect
+                this._applyTag('hr-line', dashesStartIter, dashesEndIter);
+            }
+            
+            // Don't process this line further for other patterns
+            return;
         }
         
         // Bullet points - handle * and - bullets
@@ -2096,13 +2567,33 @@ class MarkdownRenderer {
 // ============================================================================
 
 class FileManager {
-    static getJotDirectory() {
+    static getJotDirectory(settingsManager = null) {
         const homeDir = GLib.get_home_dir();
+        
+        // Try to get path from settings
+        if (settingsManager) {
+            const notesPath = settingsManager.get('notesPath');
+            if (notesPath) {
+                // Handle ~ expansion
+                let expandedPath = notesPath;
+                if (expandedPath.startsWith('~/')) {
+                    expandedPath = GLib.build_filenamev([homeDir, expandedPath.substring(2)]);
+                } else if (expandedPath === '~') {
+                    expandedPath = homeDir;
+                } else if (!expandedPath.startsWith('/')) {
+                    // Relative path - make it relative to home
+                    expandedPath = GLib.build_filenamev([homeDir, expandedPath]);
+                }
+                return expandedPath;
+            }
+        }
+        
+        // Fall back to default
         return GLib.build_filenamev([homeDir, ...JOT_DIR]);
     }
 
-    static ensureJotDirectoryExists() {
-        const jotDir = this.getJotDirectory();
+    static ensureJotDirectoryExists(settingsManager = null) {
+        const jotDir = this.getJotDirectory(settingsManager);
         const jotDirFile = Gio.File.new_for_path(jotDir);
 
         try {
@@ -2279,15 +2770,19 @@ class JotWindow extends Adw.ApplicationWindow {
 
         this._currentFilename = 'untitled.md';
         this._currentFilePath = null; // Track the full path of opened file
+        this._settingsManager = new SettingsManager();
         this._themeManager = new ThemeManager();
         this._zoomLevel = 100; // Zoom level percentage (default 100%)
         this._zoomTimeoutId = null; // Track zoom indicator timeout
         this._filenameUpdateTimeoutId = null; // Track filename update debouncing
         this._markdownRenderer = null; // Will be initialized after textview is created
         this._lineMovePending = false; // Throttle line move operations
+        this._hasUnsavedChanges = false; // Track if file has unsaved changes
+        this._savedContent = ''; // Track last saved content
 
         this._buildUI();
         this._setupTheme();
+        this._setupSettings();
         this._setupKeyboardShortcuts();
 
         if (!this._loadExistingDefaultNote()) {
@@ -2303,12 +2798,134 @@ class JotWindow extends Adw.ApplicationWindow {
             spacing: 0,
         });
 
+        mainBox.append(this._createSearchBar());
         mainBox.append(this._createTextView());
         mainBox.append(this._createStatusBar());
 
         this.set_content(mainBox);
     }
 
+    _createSearchBar() {
+        // Create search bar (initially hidden)
+        this._searchBar = new Gtk.SearchBar({
+            search_mode_enabled: false,
+        });
+        
+        // Create search box layout (match status bar styling)
+        const searchBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 4,
+            halign: Gtk.Align.CENTER,
+            height_request: 20,
+            margin_start: 0,
+            margin_end: 0,
+            margin_top: 0,
+            margin_bottom: 0,
+        });
+        
+        // Create search entry
+        this._searchEntry = new Gtk.SearchEntry({
+            placeholder_text: 'Search...',
+            hexpand: false,
+        });
+        this._searchEntry.add_css_class('search-entry');
+        
+        // Connect search entry signals
+        this._searchEntry.connect('search-changed', () => {
+            this._performSearch();
+        });
+        
+        // Handle Enter key using both methods for compatibility
+        // Method 1: activate signal (standard way for SearchEntry)
+        this._searchEntry.connect('activate', () => {
+            this._findNextKeepFocus(); // Stay in search box
+        });
+        
+        // Method 2: Key controller for Shift+Enter
+        const searchKeyController = new Gtk.EventControllerKey();
+        searchKeyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            if ((keyval === KEY_ENTER || keyval === KEY_KP_ENTER) && (state & SHIFT_MASK)) {
+                this._findPreviousKeepFocus(); // Stay in search box
+                return true;
+            }
+            return false;
+        });
+        this._searchEntry.add_controller(searchKeyController);
+        
+        this._searchEntry.connect('stop-search', () => {
+            this._hideSearch();
+        });
+        
+        // Previous button
+        const prevButton = new Gtk.Button({
+            label: '↑',
+            tooltip_text: 'Previous match (Shift+Enter)',
+        });
+        prevButton.add_css_class('search-button');
+        prevButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        prevButton.connect('clicked', () => this._findPreviousKeepFocus());
+        
+        // Next button
+        const nextButton = new Gtk.Button({
+            label: '↓',
+            tooltip_text: 'Next match (Enter)',
+        });
+        nextButton.add_css_class('search-button');
+        nextButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        nextButton.connect('clicked', () => this._findNextKeepFocus());
+        
+        // Match count label
+        this._matchCountLabel = new Gtk.Label({
+            label: '',
+            margin_start: 0,
+            margin_end: 0,
+            hexpand: false,
+            vexpand: false,
+            xalign: 0,
+            visible: false, // Hide initially until we have search results
+        });
+        this._matchCountLabel.add_css_class('search-match-label');
+        
+        // Case sensitive toggle
+        this._caseSensitiveButton = new Gtk.ToggleButton({
+            label: 'Aa',
+            tooltip_text: 'Case sensitive',
+        });
+        this._caseSensitiveButton.add_css_class('search-button');
+        this._caseSensitiveButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        this._caseSensitiveButton.connect('toggled', () => {
+            this._performSearch();
+        });
+        
+        // Close button
+        const closeButton = new Gtk.Button({
+            label: '×',
+            tooltip_text: 'Close (Escape)',
+        });
+        closeButton.add_css_class('search-button');
+        closeButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        closeButton.connect('clicked', () => this._hideSearch());
+        
+        // Add widgets to search box
+        searchBox.append(this._searchEntry);
+        searchBox.append(prevButton);
+        searchBox.append(nextButton);
+        searchBox.append(this._matchCountLabel);
+        searchBox.append(this._caseSensitiveButton);
+        searchBox.append(closeButton);
+        
+        this._searchBar.set_child(searchBox);
+        this._searchBar.set_key_capture_widget(this);
+        
+        // Connect the search entry to the search bar (fixes GTK warning)
+        this._searchBar.connect_entry(this._searchEntry);
+        
+        // Initialize search state
+        this._searchMatches = [];
+        this._currentMatchIndex = -1;
+        
+        return this._searchBar;
+    }
 
     _createTextView() {
         this._textView = new Gtk.TextView({
@@ -2322,15 +2939,22 @@ class JotWindow extends Adw.ApplicationWindow {
         });
         this._textView.add_css_class('jot-textview');
 
-        // Initialize markdown renderer
+        // Initialize markdown renderer with mood config from settings
+        const moodConfig = this._getMoodConfig();
         this._markdownRenderer = new MarkdownRenderer(
             this._textView,
-            this._themeManager.colors
+            this._themeManager.colors,
+            moodConfig
         );
 
         // Connect to buffer changes to update filename with debouncing (200ms delay)
         const buffer = this._textView.get_buffer();
         buffer.connect('changed', () => {
+            // Mark as having unsaved changes
+            const [start, end] = buffer.get_bounds();
+            const currentContent = buffer.get_text(start, end, false);
+            this._hasUnsavedChanges = (currentContent !== this._savedContent);
+            
             // Cancel previous timeout if exists
             if (this._filenameUpdateTimeoutId) {
                 GLib.source_remove(this._filenameUpdateTimeoutId);
@@ -2386,45 +3010,66 @@ class JotWindow extends Adw.ApplicationWindow {
         const keyController = new Gtk.EventControllerKey();
         
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            // Detect undo/redo operations (Ctrl+Z and Ctrl+Shift+Z)
+            if (keyval === 122 && (state & CTRL_MASK)) { // 'z' key
+                // Set flag to indicate undo/redo operation
+                // The flag will be reset in _setupSignals after the render completes
+                if (this._markdownRenderer) {
+                    this._markdownRenderer._isUndoRedoOperation = true;
+                }
+                // Let the default undo/redo handler process it
+                return false;
+            }
+            
             // Get current position and line
             const cursor = buffer.get_insert();
             const iter = buffer.get_iter_at_mark(cursor);
             const cursorOffset = iter.get_offset();
             
-            // Get all text and find current line
+            // Get current line using GTK's native line tracking (handles UTF-8 correctly)
+            const currentLineIter = iter.copy();
+            const currentLineNum = currentLineIter.get_line();
+            
+            // Get line start and end using GTK iterators (this handles multi-byte chars correctly)
+            const lineStart = currentLineIter.copy();
+            lineStart.set_line_offset(0);
+            const lineStartOffset = lineStart.get_offset();
+            
+            const lineEnd = currentLineIter.copy();
+            lineEnd.set_line_offset(0);
+            if (!lineEnd.ends_line()) {
+                lineEnd.forward_to_line_end();
+            }
+            const lineEndOffset = lineEnd.get_offset();
+            
+            // Get the line text
+            const lineText = buffer.get_text(lineStart, lineEnd, false);
+            
+            // Get all text for debugging/context only
             const [start, end] = buffer.get_bounds();
             const allText = buffer.get_text(start, end, false);
             const lines = allText.split('\n');
             
-            // Find which line we're on
-            let offset = 0;
-            let currentLineNum = 0;
-            let lineText = '';
-            let lineStartOffset = 0;
-            
-            for (let i = 0; i < lines.length; i++) {
-                const lineLength = lines[i].length;
-                if (cursorOffset >= offset && cursorOffset <= offset + lineLength) {
-                    currentLineNum = i;
-                    lineText = lines[i];
-                    lineStartOffset = offset;
-                    break;
-                }
-                offset += lineLength + 1; // +1 for newline
-            }
-            
-            if (lineText === undefined) {
-                lineText = lines[lines.length - 1] || '';
-                lineStartOffset = offset;
-            }
-            
-            // Handle Enter key (65293)
-            if (keyval === 65293 && !(state & CTRL_MASK)) {
+            // Handle Enter key and Numpad Enter
+            if ((keyval === KEY_ENTER || keyval === KEY_KP_ENTER) && !(state & CTRL_MASK)) {
                 print('Enter key detected on bullet list handler');
                 const bulletMatch = lineText.match(/^(\s*)([-*])\s+(.*)$/);
                 if (bulletMatch) {
                     print('Bullet line detected!');
                     const [, indent, bullet, content] = bulletMatch;
+                    
+                    // Check if cursor is at the end of the line using line offset
+                    const cursorLineOffset = iter.get_line_offset();
+                    const lineLength = lineText.length;
+                    const isCursorAtEnd = cursorLineOffset === lineLength;
+                    
+                    print(`Cursor position: ${cursorLineOffset}, Line length: ${lineLength}, At end: ${isCursorAtEnd}`);
+                    
+                    // Only handle bullet behavior if cursor is at the end of the line
+                    if (!isCursorAtEnd) {
+                        print('Cursor not at end of line, allowing default Enter behavior');
+                        return false;
+                    }
                     
                     // Check if this is a todo item (has [ ] or [X] or [x])
                     const hasTodo = content.match(/^\[([ Xx])\]\s*/);
@@ -2432,9 +3077,29 @@ class JotWindow extends Adw.ApplicationWindow {
                     // If line is empty bullet (or empty todo), remove it and exit list
                     if (!content.trim() || (hasTodo && !content.slice(hasTodo[0].length).trim())) {
                         print('Empty bullet, removing');
-                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
+                        
+                        buffer.begin_user_action();
+                        
+                        // Get the iterator for the current cursor position and navigate to line start/end
+                        const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                        const lineStart = cursorIter.copy();
+                        lineStart.set_line_offset(0);
+                        const lineEnd = cursorIter.copy();
+                        lineEnd.set_line_offset(0);
+                        if (!lineEnd.ends_line()) {
+                            lineEnd.forward_to_line_end();
+                        }
+                        
+                        // Delete the line content and replace with empty line
                         buffer.delete(lineStart, lineEnd);
+                        
+                        buffer.end_user_action();
+                        
+                        // Force immediate render to avoid visual glitch
+                        if (this._markdownRenderer) {
+                            this._markdownRenderer._updateSyntaxVisibility();
+                        }
+                        
                         return true;
                     }
                     
@@ -2449,16 +3114,68 @@ class JotWindow extends Adw.ApplicationWindow {
                         newBullet = `\n${indent}${bullet} `;
                     }
                     buffer.insert_at_cursor(newBullet, -1);
+                    
+                    // Force immediate render to avoid visual glitch
+                    if (this._markdownRenderer) {
+                        this._markdownRenderer._updateSyntaxVisibility();
+                    }
+                    
                     return true;
                 }
             }
             
             // Handle Tab key (65289)
             if (keyval === 65289 && !(state & CTRL_MASK)) {
-                print('Tab key detected');
+                print('===== TAB KEY PRESSED =====');
+                print(`Current line number: ${currentLineNum}`);
+                print(`Current line text: "${lineText}"`);
+                print(`All lines in buffer: [${lines.length} lines total]`);
+                for (let i = 0; i < Math.min(lines.length, 20); i++) {
+                    print(`  Line ${i}: "${lines[i]}"`);
+                }
+                
+                // Check if we're on a header line first (headers take priority)
+                const headerMatch = lineText.match(/^(#{1,})(\s+)(.+)$/);
+                if (headerMatch) {
+                    print('Increasing header level');
+                    const [, hashes, spaces, content] = headerMatch;
+                    const newLine = `#${hashes}${spaces}${content}`;
+                    
+                    // Wrap in user action for proper undo
+                    buffer.begin_user_action();
+                    
+                    // Get the iterator for the current cursor position and navigate to line start/end
+                    const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                    const cursorLineOffset = cursorIter.get_line_offset();
+                    const lineStart = cursorIter.copy();
+                    lineStart.set_line_offset(0);
+                    const lineStartOffset = lineStart.get_offset(); // Save absolute offset before modifications
+                    const lineEnd = cursorIter.copy();
+                    lineEnd.set_line_offset(0);
+                    if (!lineEnd.ends_line()) {
+                        lineEnd.forward_to_line_end();
+                    }
+                    
+                    buffer.delete(lineStart, lineEnd);
+                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                    buffer.insert(insertIter, newLine, -1);
+                    
+                    // Restore cursor position (adjusted for added #)
+                    const newCursorIter = buffer.get_iter_at_offset(lineStartOffset + cursorLineOffset + 1);
+                    buffer.place_cursor(newCursorIter);
+                    buffer.end_user_action();
+                    
+                    // Force immediate re-render to avoid visual glitch
+                    if (this._markdownRenderer) {
+                        this._markdownRenderer._updateSyntaxVisibility();
+                    }
+                    
+                    return true;
+                }
                 
                 // Check if there's a selection
                 const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+                print(`Has selection: ${hasSelection}`);
                 
                 if (hasSelection) {
                     // Multi-line selection: indent all selected bullet lines
@@ -2475,7 +3192,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         const lineEndOffset = offset + lineLength;
                         
                         // Check if this line is partially or fully selected
-                        if (selStartOffset <= lineEndOffset && selEndOffset >= offset) {
+                        // Use < and > to avoid including lines that are only touched at boundaries
+                        if (selStartOffset < lineEndOffset && selEndOffset > offset) {
                             if (firstLineNum === -1) firstLineNum = i;
                             lastLineNum = i;
                         }
@@ -2487,7 +3205,7 @@ class JotWindow extends Adw.ApplicationWindow {
                         // Check if any selected lines are bullets
                         let anyBullets = false;
                         for (let i = firstLineNum; i <= lastLineNum; i++) {
-                            if (lines[i].match(/^(\s*)([-*])(\s+.*)$/)) {
+                            if (lines[i].match(/^(\s*)([-*])(\s*.*)$/)) {
                                 anyBullets = true;
                                 break;
                             }
@@ -2515,7 +3233,7 @@ class JotWindow extends Adw.ApplicationWindow {
                             
                             for (let i = 0; i < lines.length; i++) {
                                 if (i >= firstLineNum && i <= lastLineNum) {
-                                    const bulletMatch = lines[i].match(/^(\s*)([-*])(\s+.*)$/);
+                                    const bulletMatch = lines[i].match(/^(\s*)([-*])(\s*.*)$/);
                                     if (bulletMatch) {
                                         const [, indent, bullet, rest] = bulletMatch;
                                         newLines.push(`  ${indent}${bullet}${rest}`);
@@ -2545,6 +3263,9 @@ class JotWindow extends Adw.ApplicationWindow {
                             buffer.select_range(newSelStart, newSelEnd);
                             buffer.end_user_action();
                             
+                            // Scroll to keep selection visible
+                            this._textView.scroll_to_mark(buffer.get_insert(), 0.0, false, 0.0, 0.0);
+                            
                             // Force immediate re-render to avoid visual glitch
                             if (this._markdownRenderer) {
                                 this._markdownRenderer._updateSyntaxVisibility();
@@ -2555,19 +3276,39 @@ class JotWindow extends Adw.ApplicationWindow {
                     }
                 } else {
                     // Single line: original behavior
-                    const bulletMatch = lineText.match(/^(\s*)([-*])(\s+.*)$/);
+                    // Changed pattern from (\s+.*) to (\s*.*) to match bullets with no space or any content after
+                    const bulletMatch = lineText.match(/^(\s*)([-*])(\s*.*)$/);
                     if (bulletMatch) {
-                        print('Indenting bullet');
+                        print('===== TAB INDENT DEBUG =====');
+                        print(`Current line number: ${currentLineNum}`);
+                        print(`Current line text: "${lineText}"`);
+                        print(`Line length: ${lineText.length}`);
+                        print(`Calculated line offsets: ${lineStartOffset} to ${lineEndOffset}`);
+                        print(`Bullet match - indent: "${bulletMatch[1]}", bullet: "${bulletMatch[2]}", rest: "${bulletMatch[3]}"`);
+                        
                         const [, indent, bullet, rest] = bulletMatch;
                         const newLine = `  ${indent}${bullet}${rest}`;
+                        print(`New line will be: "${newLine}"`);
                         
                         // Wrap in user action for proper undo
                         buffer.begin_user_action();
-                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
-                        buffer.delete(lineStart, lineEnd);
-                        const insertIter = buffer.get_iter_at_offset(lineStartOffset);
-                        buffer.insert(insertIter, newLine, -1);
+                        
+                        // Recreate iterators at the calculated offsets to ensure they're fresh
+                        const deleteStart = buffer.get_iter_at_offset(lineStartOffset);
+                        const deleteEnd = buffer.get_iter_at_offset(lineEndOffset);
+                        
+                        // Log what we're about to delete
+                        const textToDelete = buffer.get_text(deleteStart, deleteEnd, false);
+                        print(`About to delete from offset ${lineStartOffset} to ${lineEndOffset}: "${textToDelete}"`);
+                        
+                        // Delete the line content (deleteStart iterator will be at the deletion point after this)
+                        buffer.delete(deleteStart, deleteEnd);
+                        // Reuse deleteStart iterator which is now at the correct insertion point after deletion
+                        buffer.insert(deleteStart, newLine, -1);
+                        
+                        print(`Inserted: "${newLine}"`);
+                        print('===== END TAB INDENT DEBUG =====');
+                        
                         buffer.end_user_action();
                         
                         // Force immediate re-render to avoid visual glitch
@@ -2576,6 +3317,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         }
                         
                         return true;
+                    } else {
+                        print(`Tab: No bullet match for line: "${lineText}"`);
                     }
                 }
             }
@@ -2583,6 +3326,46 @@ class JotWindow extends Adw.ApplicationWindow {
             // Handle Shift+Tab key (ISO_Left_Tab = 65056)
             if (keyval === 65056) {
                 print('Shift+Tab detected');
+                print(`Current line text: "${lineText}"`);
+                
+                // Check if we're on a header line first (headers take priority)
+                const headerMatch = lineText.match(/^(#{2,})(\s+)(.+)$/);
+                if (headerMatch) {
+                    print('Decreasing header level');
+                    const [, hashes, spaces, content] = headerMatch;
+                    const newLine = `${hashes.substring(1)}${spaces}${content}`;
+                    
+                    // Wrap in user action for proper undo
+                    buffer.begin_user_action();
+                    
+                    // Get the iterator for the current cursor position and navigate to line start/end
+                    const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
+                    const cursorLineOffset = cursorIter.get_line_offset();
+                    const lineStart = cursorIter.copy();
+                    lineStart.set_line_offset(0);
+                    const lineStartOffset = lineStart.get_offset(); // Save absolute offset before modifications
+                    const lineEnd = cursorIter.copy();
+                    lineEnd.set_line_offset(0);
+                    if (!lineEnd.ends_line()) {
+                        lineEnd.forward_to_line_end();
+                    }
+                    
+                    buffer.delete(lineStart, lineEnd);
+                    const insertIter = buffer.get_iter_at_offset(lineStartOffset);
+                    buffer.insert(insertIter, newLine, -1);
+                    
+                    // Restore cursor position (adjusted for removed #)
+                    const newCursorIter = buffer.get_iter_at_offset(lineStartOffset + Math.max(0, cursorLineOffset - 1));
+                    buffer.place_cursor(newCursorIter);
+                    buffer.end_user_action();
+                    
+                    // Force immediate re-render to avoid visual glitch
+                    if (this._markdownRenderer) {
+                        this._markdownRenderer._updateSyntaxVisibility();
+                    }
+                    
+                    return true;
+                }
                 
                 // Check if there's a selection
                 const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
@@ -2602,7 +3385,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         const lineEndOffset = offset + lineLength;
                         
                         // Check if this line is partially or fully selected
-                        if (selStartOffset <= lineEndOffset && selEndOffset >= offset) {
+                        // Use < and > to avoid including lines that are only touched at boundaries
+                        if (selStartOffset < lineEndOffset && selEndOffset > offset) {
                             if (firstLineNum === -1) firstLineNum = i;
                             lastLineNum = i;
                         }
@@ -2614,7 +3398,7 @@ class JotWindow extends Adw.ApplicationWindow {
                         // Check if any selected lines are bullets with indentation
                         let anyIndentedBullets = false;
                         for (let i = firstLineNum; i <= lastLineNum; i++) {
-                            if (lines[i].match(/^(\s+)([-*])(\s+.*)$/)) {
+                            if (lines[i].match(/^(\s+)([-*])(\s*.*)$/)) {
                                 anyIndentedBullets = true;
                                 break;
                             }
@@ -2642,7 +3426,7 @@ class JotWindow extends Adw.ApplicationWindow {
                             
                             for (let i = 0; i < lines.length; i++) {
                                 if (i >= firstLineNum && i <= lastLineNum) {
-                                    const bulletMatch = lines[i].match(/^(\s+)([-*])(\s+.*)$/);
+                                    const bulletMatch = lines[i].match(/^(\s+)([-*])(\s*.*)$/);
                                     if (bulletMatch) {
                                         const [, indent, bullet, rest] = bulletMatch;
                                         // Remove up to 2 spaces
@@ -2675,6 +3459,9 @@ class JotWindow extends Adw.ApplicationWindow {
                             buffer.select_range(newSelStart, newSelEnd);
                             buffer.end_user_action();
                             
+                            // Scroll to keep selection visible
+                            this._textView.scroll_to_mark(buffer.get_insert(), 0.0, false, 0.0, 0.0);
+                            
                             // Force immediate re-render to avoid visual glitch
                             if (this._markdownRenderer) {
                                 this._markdownRenderer._updateSyntaxVisibility();
@@ -2685,21 +3472,41 @@ class JotWindow extends Adw.ApplicationWindow {
                     }
                 } else {
                     // Single line: original behavior
-                    const bulletMatch = lineText.match(/^(\s+)([-*])(\s+.*)$/);
+                    // Changed pattern from (\s+.*) to (\s*.*) to match bullets with no space or any content after
+                    const bulletMatch = lineText.match(/^(\s+)([-*])(\s*.*)$/);
                     if (bulletMatch) {
-                        print('Outdenting bullet');
+                        print('===== SHIFT+TAB OUTDENT DEBUG =====');
+                        print(`Current line number: ${currentLineNum}`);
+                        print(`Current line text: "${lineText}"`);
+                        print(`Line length: ${lineText.length}`);
+                        print(`Calculated line offsets: ${lineStartOffset} to ${lineEndOffset}`);
+                        print(`Bullet match - indent: "${bulletMatch[1]}", bullet: "${bulletMatch[2]}", rest: "${bulletMatch[3]}"`);
+                        
                         const [, indent, bullet, rest] = bulletMatch;
                         // Remove up to 2 spaces
                         const newIndent = indent.length >= 2 ? indent.substring(2) : '';
                         const newLine = `${newIndent}${bullet}${rest}`;
+                        print(`New line will be: "${newLine}"`);
                         
                         // Wrap in user action for proper undo
                         buffer.begin_user_action();
-                        const lineStart = buffer.get_iter_at_offset(lineStartOffset);
-                        const lineEnd = buffer.get_iter_at_offset(lineStartOffset + lineText.length);
-                        buffer.delete(lineStart, lineEnd);
-                        const insertIter = buffer.get_iter_at_offset(lineStartOffset);
-                        buffer.insert(insertIter, newLine, -1);
+                        
+                        // Recreate iterators at the calculated offsets to ensure they're fresh
+                        const deleteStart = buffer.get_iter_at_offset(lineStartOffset);
+                        const deleteEnd = buffer.get_iter_at_offset(lineEndOffset);
+                        
+                        // Log what we're about to delete
+                        const textToDelete = buffer.get_text(deleteStart, deleteEnd, false);
+                        print(`About to delete from offset ${lineStartOffset} to ${lineEndOffset}: "${textToDelete}"`);
+                        
+                        // Delete the line content (deleteStart iterator will be at the deletion point after this)
+                        buffer.delete(deleteStart, deleteEnd);
+                        // Reuse deleteStart iterator which is now at the correct insertion point after deletion
+                        buffer.insert(deleteStart, newLine, -1);
+                        
+                        print(`Inserted: "${newLine}"`);
+                        print('===== END SHIFT+TAB OUTDENT DEBUG =====');
+                        
                         buffer.end_user_action();
                         
                         // Force immediate re-render to avoid visual glitch
@@ -2708,6 +3515,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         }
                         
                         return true;
+                    } else {
+                        print(`Shift+Tab: No bullet match for line: "${lineText}"`);
                     }
                 }
             }
@@ -2757,14 +3566,12 @@ class JotWindow extends Adw.ApplicationWindow {
             
             // Handle Ctrl+Up: Move line up
             if (keyval === KEY_UP && (state & CTRL_MASK)) {
-                print('Ctrl+Up detected');
                 this._moveLineUp();
                 return true;
             }
             
             // Handle Ctrl+Down: Move line down
             if (keyval === KEY_DOWN && (state & CTRL_MASK)) {
-                print('Ctrl+Down detected');
                 this._moveLineDown();
                 return true;
             }
@@ -2788,7 +3595,7 @@ class JotWindow extends Adw.ApplicationWindow {
         });
         this._statusBar.add_css_class('jot-statusbar');
 
-        const jotDir = FileManager.getJotDirectory();
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
         this._pathLabel = new Gtk.Label({
             label: GLib.build_filenamev([jotDir, this._currentFilename]),
             halign: Gtk.Align.START,
@@ -2797,8 +3604,53 @@ class JotWindow extends Adw.ApplicationWindow {
             margin_start: 8,
         });
         this._pathLabel.add_css_class('status-label');
+        
+        // Set pointer cursor for path label
+        this._pathLabel.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        
+        // Make the path label clickable
+        const pathGesture = new Gtk.GestureClick();
+        pathGesture.connect('pressed', () => {
+            this._openFileLocation();
+        });
+        this._pathLabel.add_controller(pathGesture);
 
         this._statusBar.append(this._pathLabel);
+
+        // Add right-side buttons
+        const rightBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 4,
+            halign: Gtk.Align.END,
+            margin_end: 8,
+        });
+
+        // FAQ button (question mark)
+        const faqButton = new Gtk.Button({
+            label: '?',
+            tooltip_text: 'Open FAQ',
+            halign: Gtk.Align.CENTER,
+            valign: Gtk.Align.CENTER,
+        });
+        faqButton.add_css_class('status-button');
+        faqButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        faqButton.connect('clicked', () => this._openFAQ());
+
+        // Settings button (cog/gear)
+        const settingsButton = new Gtk.Button({
+            label: '⚙',
+            tooltip_text: 'Open Settings',
+            halign: Gtk.Align.CENTER,
+            valign: Gtk.Align.CENTER,
+        });
+        settingsButton.add_css_class('status-button');
+        settingsButton.add_css_class('status-button-large');
+        settingsButton.set_cursor(Gdk.Cursor.new_from_name('pointer', null));
+        settingsButton.connect('clicked', () => this._openSettings());
+
+        rightBox.append(faqButton);
+        rightBox.append(settingsButton);
+        this._statusBar.append(rightBox);
 
         return this._statusBar;
     }
@@ -2903,6 +3755,100 @@ class JotWindow extends Adw.ApplicationWindow {
         }
         print('Theme reload complete');
     }
+    
+    _setupSettings() {
+        // Setup settings file monitor
+        this._settingsManager.setupMonitor(() => {
+            print('Settings changed, reloading...');
+            this._applySettings();
+        });
+    }
+    
+    _getDefaultMoodsStatic() {
+        return {
+            metal: { colors: ['#4A5568', '#CBD5E0'] },
+            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
+            fire: { colors: ['#FF4500', '#FFD700'] },
+            forest: { colors: ['#228B22', '#90EE90'] },
+            lava: { colors: ['#8B0000', '#FF4500'] },
+            mint: { colors: ['#00C9A7', '#C7FFED'] },
+            amber: { colors: ['#FF8C00', '#FFE4B5'] },
+            ocean: { colors: ['#006994', '#63B8FF'] },
+            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
+            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
+            stone: { colors: ['#708090', '#B0B8C0'] },
+            ice: { colors: ['#00CED1', '#E0FFFF'] },
+            purple: { colors: ['#6A0DAD', '#DA70D6'] },
+            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
+            royal: { colors: ['#4169E1', '#B0C4DE'] },
+            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
+            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
+            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
+            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
+            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
+            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
+            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
+            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
+            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
+            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
+            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
+            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
+            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
+            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
+            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
+            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
+            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
+            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
+            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
+        };
+    }
+    
+    _getMoodConfig() {
+        // Build mood configuration from settings
+        const defaultMoods = this._getDefaultMoodsStatic();
+        const headerMoods = this._settingsManager.get('headerMoods') || Object.keys(defaultMoods);
+        const customMoods = this._settingsManager.get('customMoods') || {};
+        
+        print(`Getting mood config: headerMoods = ${JSON.stringify(headerMoods.slice(0, 5))}...`);
+        
+        // Filter out example/comment entries from customMoods
+        const filteredCustomMoods = {};
+        for (const [key, value] of Object.entries(customMoods)) {
+            if (!key.startsWith('_') && Array.isArray(value)) {
+                filteredCustomMoods[key] = { colors: value };
+                print(`Added custom mood: ${key}`);
+            }
+        }
+        
+        // Merge default moods with custom moods
+        const allMoods = Object.assign({}, defaultMoods, filteredCustomMoods);
+        
+        // Filter to only include moods listed in headerMoods
+        const moodConfig = {};
+        for (const moodName of headerMoods) {
+            if (allMoods[moodName]) {
+                moodConfig[moodName] = allMoods[moodName];
+            }
+        }
+        
+        print(`Final mood config has ${Object.keys(moodConfig).length} moods: ${Object.keys(moodConfig).slice(0, 5).join(', ')}...`);
+        
+        return moodConfig;
+    }
+    
+    _applySettings() {
+        // Reload settings and apply to renderer
+        if (this._markdownRenderer) {
+            const moodConfig = this._getMoodConfig();
+            this.moodConfig = moodConfig;
+            
+            // Update moods and force a complete re-render with cursor context
+            this._markdownRenderer.moodConfig = moodConfig;
+            this._markdownRenderer._initTags();
+            this._markdownRenderer._updateSyntaxVisibility();
+        }
+        // Can add more settings application here (fontSize, fontFamily, etc.)
+    }
 
     _applyCSS() {
         // Remove old CSS provider if it exists
@@ -2929,9 +3875,208 @@ class JotWindow extends Adw.ApplicationWindow {
         }
     }
 
+    _showSearch() {
+        // Check if search is already open
+        const alreadyOpen = this._searchBar.get_search_mode();
+        
+        // Enable search mode in markdown renderer to prevent interference
+        if (this._markdownRenderer) {
+            this._markdownRenderer._searchMode = true;
+        }
+        
+        this._searchBar.set_search_mode(true);
+        this._searchEntry.grab_focus();
+        
+        if (alreadyOpen) {
+            // If search is already open, just select all text in search box
+            this._searchEntry.select_region(0, -1);
+        } else {
+            // If opening fresh, check if there's selected text to use as search term
+            const buffer = this._textView.get_buffer();
+            const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+            if (hasSelection) {
+                const selectedText = buffer.get_text(selStart, selEnd, false);
+                if (selectedText && selectedText.indexOf('\n') === -1) { // Only if single line
+                    this._searchEntry.set_text(selectedText);
+                    this._searchEntry.select_region(0, -1); // Select all text in entry
+                }
+            }
+            
+            this._performSearch();
+        }
+    }
+    
+    _hideSearch() {
+        // Disable search mode in markdown renderer
+        if (this._markdownRenderer) {
+            this._markdownRenderer._searchMode = false;
+        }
+        
+        this._searchBar.set_search_mode(false);
+        this._clearSearchHighlights();
+        this._searchMatches = [];
+        this._currentMatchIndex = -1;
+        this._matchCountLabel.set_visible(false);
+        this._textView.grab_focus();
+    }
+    
+    _performSearch() {
+        const searchText = this._searchEntry.get_text();
+        const buffer = this._textView.get_buffer();
+        
+        // Clear previous highlights
+        this._clearSearchHighlights();
+        this._searchMatches = [];
+        this._currentMatchIndex = -1;
+        
+        if (!searchText) {
+            this._matchCountLabel.set_label('');
+            this._matchCountLabel.set_visible(false);
+            return;
+        }
+        
+        // Get search flags
+        const caseSensitive = this._caseSensitiveButton.get_active();
+        let flags = Gtk.TextSearchFlags.VISIBLE_ONLY | Gtk.TextSearchFlags.TEXT_ONLY;
+        if (!caseSensitive) {
+            flags |= Gtk.TextSearchFlags.CASE_INSENSITIVE;
+        }
+        
+        // Find all matches
+        const [start, end] = buffer.get_bounds();
+        let searchIter = start.copy();
+        
+        while (true) {
+            const result = searchIter.forward_search(searchText, flags, end);
+            
+            // forward_search returns [found, match_start, match_end] where found is boolean
+            if (!result || !result[0]) break;
+            
+            const matchStart = result[1];
+            const matchEnd = result[2];
+            
+            if (!matchStart || !matchEnd) break;
+            
+            this._searchMatches.push({
+                start: matchStart.get_offset(),
+                end: matchEnd.get_offset()
+            });
+            
+            // Highlight this match
+            buffer.apply_tag_by_name('search-highlight', matchStart, matchEnd);
+            
+            // Move search iter forward
+            searchIter = matchEnd.copy();
+        }
+        
+        // Update match count
+        if (this._searchMatches.length > 0) {
+            this._currentMatchIndex = 0;
+            this._highlightCurrentMatch(false); // Don't grab focus during search
+            this._matchCountLabel.set_visible(true);
+            this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+        } else {
+            this._matchCountLabel.set_visible(true);
+            this._matchCountLabel.set_label('No matches');
+        }
+    }
+    
+    _findNext() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex + 1) % this._searchMatches.length;
+        this._highlightCurrentMatch(true); // Grab focus when navigating
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _findPrevious() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex - 1 + this._searchMatches.length) % this._searchMatches.length;
+        this._highlightCurrentMatch(true); // Grab focus when navigating
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _findNextKeepFocus() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex + 1) % this._searchMatches.length;
+        this._highlightCurrentMatch(false); // Don't grab focus - stay in search box
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _findPreviousKeepFocus() {
+        if (this._searchMatches.length === 0) return;
+        
+        this._currentMatchIndex = (this._currentMatchIndex - 1 + this._searchMatches.length) % this._searchMatches.length;
+        this._highlightCurrentMatch(false); // Don't grab focus - stay in search box
+        this._matchCountLabel.set_label(`${this._currentMatchIndex + 1} of ${this._searchMatches.length}`);
+    }
+    
+    _highlightCurrentMatch(grabFocus = false) {
+        if (this._currentMatchIndex < 0 || this._currentMatchIndex >= this._searchMatches.length) return;
+        
+        const buffer = this._textView.get_buffer();
+        
+        // Remove current match highlight from all matches
+        for (const match of this._searchMatches) {
+            const matchStart = buffer.get_iter_at_offset(match.start);
+            const matchEnd = buffer.get_iter_at_offset(match.end);
+            buffer.remove_tag_by_name('search-current', matchStart, matchEnd);
+        }
+        
+        // Highlight and SELECT current match
+        const currentMatch = this._searchMatches[this._currentMatchIndex];
+        const matchStart = buffer.get_iter_at_offset(currentMatch.start);
+        const matchEnd = buffer.get_iter_at_offset(currentMatch.end);
+        buffer.apply_tag_by_name('search-current', matchStart, matchEnd);
+        
+        // Create selection using buffer.select_range
+        buffer.select_range(matchStart, matchEnd);
+        
+        // Scroll to make the match visible
+        this._textView.scroll_to_iter(matchStart, 0.0, true, 0.5, 0.5);
+        
+        // Give focus to textview so selection is visible (only when explicitly requested)
+        if (grabFocus) {
+            this._textView.grab_focus();
+        }
+    }
+    
+    _clearSearchHighlights() {
+        const buffer = this._textView.get_buffer();
+        const [start, end] = buffer.get_bounds();
+        buffer.remove_tag_by_name('search-highlight', start, end);
+        buffer.remove_tag_by_name('search-current', start, end);
+    }
+
     _setupKeyboardShortcuts() {
         const keyController = new Gtk.EventControllerKey();
         keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            // Ctrl+F: Show search
+            if (keyval === KEY_F && (state & CTRL_MASK)) {
+                this._showSearch();
+                return true;
+            }
+            // Escape: Hide search (if search is active)
+            if (keyval === KEY_ESCAPE && this._searchBar.get_search_mode()) {
+                this._hideSearch();
+                return true;
+            }
+            // Ctrl+G or F3: Find next
+            if ((keyval === KEY_G && (state & CTRL_MASK) && !(state & SHIFT_MASK)) || keyval === 65470) {
+                if (this._searchBar.get_search_mode()) {
+                    this._findNext();
+                    return true;
+                }
+            }
+            // Ctrl+Shift+G or Shift+F3: Find previous
+            if ((keyval === KEY_G && (state & CTRL_MASK) && (state & SHIFT_MASK)) || (keyval === 65470 && (state & SHIFT_MASK))) {
+                if (this._searchBar.get_search_mode()) {
+                    this._findPrevious();
+                    return true;
+                }
+            }
             if ((keyval === KEY_ENTER || keyval === KEY_S) && (state & CTRL_MASK) && !(state & SHIFT_MASK)) {
                 this._saveNote();
                 return true;
@@ -2986,16 +4131,22 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _updateFilenameDisplay() {
-        // If a file is already opened, don't change the path
+        // If a file is already opened, update the label but don't change filename
         if (this._currentFilePath) {
+            const prefix = this._hasUnsavedChanges ? '● ' : '';
+            this._pathLabel.set_label(prefix + this._currentFilePath);
+            this._pathLabel.set_tooltip_text(this._hasUnsavedChanges ? 'File not saved' : this._currentFilePath);
             return;
         }
 
         const title = this._extractTitleFromContent();
         this._currentFilename = FileManager.generateFilename(title);
 
-        const jotDir = FileManager.getJotDirectory();
-        this._pathLabel.set_label(GLib.build_filenamev([jotDir, this._currentFilename]));
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
+        const fullPath = GLib.build_filenamev([jotDir, this._currentFilename]);
+        const prefix = this._hasUnsavedChanges ? '● ' : '';
+        this._pathLabel.set_label(prefix + fullPath);
+        this._pathLabel.set_tooltip_text(this._hasUnsavedChanges ? 'File not saved' : fullPath);
     }
 
     _loadExistingDefaultNote() {
@@ -3030,6 +4181,10 @@ class JotWindow extends Adw.ApplicationWindow {
         const todayDate = now.format('%Y-%m-%d');
         const initialText = `# ${todayDate}`;
         buffer.set_text(initialText, -1);
+        
+        // Reset saved content tracking
+        this._savedContent = initialText;
+        this._hasUnsavedChanges = false;
         
         // Position cursor at the end
         const iter = buffer.get_iter_at_offset(initialText.length);
@@ -3091,8 +4246,8 @@ class JotWindow extends Adw.ApplicationWindow {
         dialog.add_filter(filter);
         
         // Set initial folder to Jotite directory
-        FileManager.ensureJotDirectoryExists();
-        const jotDir = FileManager.getJotDirectory();
+        FileManager.ensureJotDirectoryExists(this._settingsManager);
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
         dialog.set_current_folder(Gio.File.new_for_path(jotDir));
         
         // Suggest a filename
@@ -3123,6 +4278,8 @@ class JotWindow extends Adw.ApplicationWindow {
             // Update current file info
             this._currentFilePath = file.get_path();
             this._currentFilename = file.get_basename();
+            this._savedContent = content;
+            this._hasUnsavedChanges = false;
             this._pathLabel.set_label(this._currentFilePath);
             
             print(`Note saved to ${this._currentFilePath}`);
@@ -3145,7 +4302,7 @@ class JotWindow extends Adw.ApplicationWindow {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, FEEDBACK_TIMEOUT_MS, () => {
             // Restore to actual path, not captured label
             const actualPath = this._currentFilePath || 
-                               GLib.build_filenamev([FileManager.getJotDirectory(), this._currentFilename]);
+                               GLib.build_filenamev([FileManager.getJotDirectory(this._settingsManager), this._currentFilename]);
             this._pathLabel.set_label(actualPath);
             return false;
         });
@@ -3195,7 +4352,7 @@ class JotWindow extends Adw.ApplicationWindow {
         this._zoomTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
             // Get the actual current path to restore
             const actualPath = this._currentFilePath || 
-                               GLib.build_filenamev([FileManager.getJotDirectory(), this._currentFilename]);
+                               GLib.build_filenamev([FileManager.getJotDirectory(this._settingsManager), this._currentFilename]);
             this._pathLabel.set_label(actualPath);
             this._zoomTimeoutId = null;
             return false;
@@ -3210,49 +4367,117 @@ class JotWindow extends Adw.ApplicationWindow {
         this._lineMovePending = true;
         
         const buffer = this._textView.get_buffer();
-        const cursor = buffer.get_insert();
-        const iter = buffer.get_iter_at_mark(cursor);
-        const currentLineNum = iter.get_line();
         
-        // Can't move the first line up
-        if (currentLineNum === 0) {
+        // Get all text and split into lines
+        const [bufStart, bufEnd] = buffer.get_bounds();
+        const allText = buffer.get_text(bufStart, bufEnd, false);
+        const lines = allText.split('\n');
+        
+        // Check if there's a selection
+        const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+        
+        let firstLineNum, lastLineNum, cursorOffset, wasSelection;
+        
+        if (hasSelection) {
+            // Get the line numbers of the selection bounds
+            firstLineNum = selStart.get_line();
+            lastLineNum = selEnd.get_line();
+            
+            // If selection end is at the start of a line (offset 0), don't include that line
+            if (selEnd.get_line_offset() === 0 && lastLineNum > firstLineNum) {
+                lastLineNum--;
+            }
+            
+            wasSelection = true;
+        } else {
+            // No selection, just move current line
+            const cursor = buffer.get_insert();
+            const iter = buffer.get_iter_at_mark(cursor);
+            firstLineNum = iter.get_line();
+            lastLineNum = firstLineNum;
+            cursorOffset = iter.get_line_offset();
+            wasSelection = false;
+        }
+        
+        // Can't move if first line is already at the top
+        if (firstLineNum === 0) {
             this._lineMovePending = false;
             return;
         }
         
-        // Calculate cursor position within the line
-        const cursorOffset = iter.get_line_offset();
+        // Build new lines for the affected region only
+        const targetLineNum = firstLineNum - 1;
+        const targetLine = lines[targetLineNum];
+        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
         
-        // Get all text and split into lines
-        const [start, end] = buffer.get_bounds();
-        const allText = buffer.get_text(start, end, false);
-        const lines = allText.split('\n');
+        // Create the reordered text for this region
+        const reorderedLines = [...selectedLines, targetLine];
+        const reorderedText = reorderedLines.join('\n');
         
-        const currentLineText = lines[currentLineNum];
-        const prevLineText = lines[currentLineNum - 1];
-        
-        // Calculate byte offsets for the two lines
-        let prevLineStart = 0;
-        for (let i = 0; i < currentLineNum - 1; i++) {
-            prevLineStart += lines[i].length + 1; // +1 for newline
+        // Use GTK's line-based API to avoid UTF-8 byte offset issues
+        // Get iterator at start of buffer, then move to target line
+        const deleteStart = buffer.get_start_iter();
+        for (let i = 0; i < targetLineNum; i++) {
+            deleteStart.forward_line();
         }
-        const currentLineStart = prevLineStart + prevLineText.length + 1;
-        const currentLineEnd = currentLineStart + currentLineText.length;
         
-        // Delete both lines and replace with swapped version
-        const deleteStart = buffer.get_iter_at_offset(prevLineStart);
-        const deleteEnd = buffer.get_iter_at_offset(currentLineEnd);
+        const deleteEnd = buffer.get_start_iter();
+        for (let i = 0; i < lastLineNum; i++) {
+            deleteEnd.forward_line();
+        }
+        // Move to end of lastLineNum
+        if (!deleteEnd.ends_line()) {
+            deleteEnd.forward_to_line_end();
+        }
+        // Include the newline after lastLineNum if it exists
+        if (lastLineNum < lines.length - 1) {
+            deleteEnd.forward_char();
+        }
+        
+        const deleteStartOffset = deleteStart.get_offset();
+        
+        // Replace with reordered lines
+        // Add trailing newline unless we're at the very last line of the file
+        const needsTrailingNewline = lastLineNum < lines.length - 1;
+        const textToInsert = needsTrailingNewline ? reorderedText + '\n' : reorderedText;
         
         buffer.begin_user_action();
+        
+        // Get the mark at deleteStart BEFORE deletion so we can find it after
+        const insertMark = buffer.create_mark(null, deleteStart, false);
+        
         buffer.delete(deleteStart, deleteEnd);
         
-        const insertIter = buffer.get_iter_at_offset(prevLineStart);
-        buffer.insert(insertIter, `${currentLineText}\n${prevLineText}`, -1);
+        // Get iterator at the mark, which stayed at the deletion point
+        const insertIter = buffer.get_iter_at_mark(insertMark);
+        buffer.insert(insertIter, textToInsert, -1);
         
-        // Move cursor to the new position (one line up, same offset)
-        const newCursorOffset = prevLineStart + Math.min(cursorOffset, currentLineText.length);
-        const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
-        buffer.place_cursor(newCursorIter);
+        // Clean up the mark
+        buffer.delete_mark(insertMark);
+        
+        // Calculate new cursor position
+        if (wasSelection) {
+            // Selection starts at beginning of what was firstLineNum (now targetLineNum)
+            const newSelStartOffset = deleteStartOffset;
+            
+            // Selection ends at the end of the moved lines
+            let selectionLength = 0;
+            for (let i = 0; i < selectedLines.length; i++) {
+                selectionLength += selectedLines[i].length;
+                if (i < selectedLines.length - 1) {
+                    selectionLength += 1; // newline
+                }
+            }
+            
+            const newSelStart = buffer.get_iter_at_offset(newSelStartOffset);
+            const newSelEndIter = buffer.get_iter_at_offset(newSelStartOffset + selectionLength);
+            buffer.select_range(newSelStart, newSelEndIter);
+        } else {
+            // Cursor moves to same line (now one up) with same offset
+            const newCursorOffset = deleteStartOffset + Math.min(cursorOffset, selectedLines[0].length);
+            const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
+            buffer.place_cursor(newCursorIter);
+        }
         
         buffer.end_user_action();
         
@@ -3272,8 +4497,6 @@ class JotWindow extends Adw.ApplicationWindow {
             // Do immediate render
             this._markdownRenderer._updateSyntaxVisibility();
         }
-        
-        this._textView.scroll_mark_onscreen(buffer.get_insert());
         
         // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
         GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
@@ -3290,50 +4513,118 @@ class JotWindow extends Adw.ApplicationWindow {
         this._lineMovePending = true;
         
         const buffer = this._textView.get_buffer();
-        const cursor = buffer.get_insert();
-        const iter = buffer.get_iter_at_mark(cursor);
-        const currentLineNum = iter.get_line();
-        
-        // Calculate cursor position within the line
-        const cursorOffset = iter.get_line_offset();
         
         // Get all text and split into lines
-        const [start, end] = buffer.get_bounds();
-        const allText = buffer.get_text(start, end, false);
+        const [bufStart, bufEnd] = buffer.get_bounds();
+        const allText = buffer.get_text(bufStart, bufEnd, false);
         const lines = allText.split('\n');
         
-        // Can't move the last line down
-        if (currentLineNum >= lines.length - 1) {
+        // Check if there's a selection
+        const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+        
+        let firstLineNum, lastLineNum, cursorOffset, wasSelection;
+        
+        if (hasSelection) {
+            // Get the line numbers of the selection bounds
+            firstLineNum = selStart.get_line();
+            lastLineNum = selEnd.get_line();
+            
+            // If selection end is at the start of a line (offset 0), don't include that line
+            if (selEnd.get_line_offset() === 0 && lastLineNum > firstLineNum) {
+                lastLineNum--;
+            }
+            
+            wasSelection = true;
+        } else {
+            // No selection, just move current line
+            const cursor = buffer.get_insert();
+            const iter = buffer.get_iter_at_mark(cursor);
+            firstLineNum = iter.get_line();
+            lastLineNum = firstLineNum;
+            cursorOffset = iter.get_line_offset();
+            wasSelection = false;
+        }
+        
+        // Can't move if last line is already at the bottom
+        if (lastLineNum >= lines.length - 1) {
             this._lineMovePending = false;
             return;
         }
         
-        const currentLineText = lines[currentLineNum];
-        const nextLineText = lines[currentLineNum + 1];
+        // Build new lines for the affected region only
+        const targetLineNum = lastLineNum + 1;
+        const targetLine = lines[targetLineNum];
+        const selectedLines = lines.slice(firstLineNum, lastLineNum + 1);
         
-        // Calculate byte offsets for the two lines
-        let currentLineStart = 0;
-        for (let i = 0; i < currentLineNum; i++) {
-            currentLineStart += lines[i].length + 1; // +1 for newline
+        // Create the reordered text for this region (target line first, then selected lines)
+        const reorderedLines = [targetLine, ...selectedLines];
+        const reorderedText = reorderedLines.join('\n');
+        
+        // Use GTK's line-based API to avoid UTF-8 byte offset issues
+        // Get iterator at start of buffer, then move to target line
+        const deleteStart = buffer.get_start_iter();
+        for (let i = 0; i < firstLineNum; i++) {
+            deleteStart.forward_line();
         }
-        const nextLineStart = currentLineStart + currentLineText.length + 1;
-        const nextLineEnd = nextLineStart + nextLineText.length;
         
-        // Delete both lines and replace with swapped version
-        const deleteStart = buffer.get_iter_at_offset(currentLineStart);
-        const deleteEnd = buffer.get_iter_at_offset(nextLineEnd);
+        const deleteEnd = buffer.get_start_iter();
+        for (let i = 0; i < targetLineNum; i++) {
+            deleteEnd.forward_line();
+        }
+        // Move to end of targetLineNum
+        if (!deleteEnd.ends_line()) {
+            deleteEnd.forward_to_line_end();
+        }
+        // Include the newline after targetLineNum if it exists
+        if (targetLineNum < lines.length - 1) {
+            deleteEnd.forward_char();
+        }
+        
+        const deleteStartOffset = deleteStart.get_offset();
+        
+        // Replace with reordered lines
+        // Add trailing newline unless we're at the very last line of the file
+        const needsTrailingNewline = targetLineNum < lines.length - 1;
+        const textToInsert = needsTrailingNewline ? reorderedText + '\n' : reorderedText;
         
         buffer.begin_user_action();
+        
+        // Get the mark at deleteStart BEFORE deletion so we can find it after
+        const insertMark = buffer.create_mark(null, deleteStart, false);
+        
         buffer.delete(deleteStart, deleteEnd);
         
-        const insertIter = buffer.get_iter_at_offset(currentLineStart);
-        buffer.insert(insertIter, `${nextLineText}\n${currentLineText}`, -1);
+        // Get iterator at the mark, which stayed at the deletion point
+        const insertIter = buffer.get_iter_at_mark(insertMark);
+        buffer.insert(insertIter, textToInsert, -1);
         
-        // Move cursor to the new position (one line down, same offset)
-        // The current line is now after the next line, so add next line length + 1 for newline
-        const newCursorOffset = currentLineStart + nextLineText.length + 1 + Math.min(cursorOffset, currentLineText.length);
-        const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
-        buffer.place_cursor(newCursorIter);
+        // Clean up the mark
+        buffer.delete_mark(insertMark);
+        
+        // Calculate new cursor position (one line down from original)
+        // The selected lines are now after the target line (plus newline between them)
+        const newSelStartOffset = deleteStartOffset + targetLine.length + 1; // +1 for newline after target
+        
+        if (wasSelection) {
+            // Selection starts at beginning of what was firstLineNum (now after targetLine)
+            // Selection ends at the end of the moved lines
+            let selectionLength = 0;
+            for (let i = 0; i < selectedLines.length; i++) {
+                selectionLength += selectedLines[i].length;
+                if (i < selectedLines.length - 1) {
+                    selectionLength += 1; // newline
+                }
+            }
+            
+            const newSelStart = buffer.get_iter_at_offset(newSelStartOffset);
+            const newSelEndIter = buffer.get_iter_at_offset(newSelStartOffset + selectionLength);
+            buffer.select_range(newSelStart, newSelEndIter);
+        } else {
+            // Cursor moves to same line (now one down) with same offset
+            const newCursorOffset = newSelStartOffset + Math.min(cursorOffset, selectedLines[0].length);
+            const newCursorIter = buffer.get_iter_at_offset(newCursorOffset);
+            buffer.place_cursor(newCursorIter);
+        }
         
         buffer.end_user_action();
         
@@ -3353,8 +4644,6 @@ class JotWindow extends Adw.ApplicationWindow {
             // Do immediate render
             this._markdownRenderer._updateSyntaxVisibility();
         }
-        
-        this._textView.scroll_mark_onscreen(buffer.get_insert());
         
         // Reset throttle flag after a short delay to allow smooth but not overwhelming repeats
         GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
@@ -3374,7 +4663,7 @@ class JotWindow extends Adw.ApplicationWindow {
         filters.append(filter);
         dialog.set_filters(filters);
 
-        const jotDir = FileManager.getJotDirectory();
+        const jotDir = FileManager.getJotDirectory(this._settingsManager);
         const jotFile = Gio.File.new_for_path(jotDir);
         dialog.set_initial_folder(jotFile);
 
@@ -3405,11 +4694,171 @@ class JotWindow extends Adw.ApplicationWindow {
 
             this._currentFilename = file.get_basename();
             this._currentFilePath = file.get_path();
+            this._savedContent = text;
+            this._hasUnsavedChanges = false;
             this._pathLabel.set_label(this._currentFilePath);
 
             print(`Loaded file: ${this._currentFilePath}`);
         } catch (e) {
             print(`Error loading file: ${e.message}`);
+        }
+    }
+
+    _openSettings() {
+        try {
+            const configDir = this._settingsManager._ensureConfigDirectory();
+            const settingsPath = GLib.build_filenamev([configDir, 'settings.json']);
+            const settingsFile = Gio.File.new_for_path(settingsPath);
+            
+            // Create default settings file if it doesn't exist
+            if (!settingsFile.query_exists(null)) {
+                const defaultSettings = JSON.stringify({
+                    _comment: "Jotite Settings - Changes to this file are applied immediately",
+                    theme: 'default',
+                    fontSize: 15,
+                    fontFamily: 'monospace',
+                    autoSave: false,
+                    headerMoods: [
+                        "metal", "cobalt", "fire", "forest", "lava", "mint",
+                        "amber", "ocean", "solar", "cryo", "stone", "ice",
+                        "purple", "sunset", "royal", "aurora", "sunken", "ghost",
+                        "sulfur", "velvet", "cicada", "lunar", "tonic", "ectoplasm",
+                        "polar", "chiaroscuro", "vanta", "toxicvelvet", "bruise",
+                        "bismuth", "ultralich", "paradox", "hazmat", "feral"
+                    ],
+                    _headerMoodsComment: "Header moods determine the color gradient for each heading level. # uses the first mood, ## uses the second, etc. Reorder this array to customize which colors appear for each heading level.",
+                    customMoods: {
+                        _example: "Add your own custom mood gradients here. Example format below:",
+                        _exampleMood: ["#FF0000", "#00FF00", "#0000FF"]
+                    },
+                    _customMoodsComment: "Custom moods can have any number of colors for the gradient (1 or more). Add them here and reference them in headerMoods array."
+                }, null, 2);
+                
+                settingsFile.replace_contents(defaultSettings, null, false, 
+                    Gio.FileCreateFlags.NONE, null);
+                print('Created default settings.json');
+            }
+            
+            // Open in a new window
+            this.application.vfunc_open([settingsFile], '');
+        } catch (e) {
+            print(`Error opening settings: ${e.message}`);
+            this._showFeedback(`✗ Error opening settings: ${e.message}`);
+        }
+    }
+
+    _openFAQ() {
+        try {
+            const configDir = this._settingsManager._ensureConfigDirectory();
+            const faqPath = GLib.build_filenamev([configDir, 'FAQ.md']);
+            const faqFile = Gio.File.new_for_path(faqPath);
+            
+            // Create default FAQ file if it doesn't exist
+            if (!faqFile.query_exists(null)) {
+                const defaultFAQ = `# Jotite FAQ
+
+## What is Jotite?
+
+Jotite is a minimalist markdown note-taking application with live rendering.
+
+## Keyboard Shortcuts
+
+- **Ctrl+S** or **Ctrl+Enter**: Save note
+- **Ctrl+Shift+S**: Save As
+- **Ctrl+N**: New note
+- **Ctrl+O**: Open note
+- **Ctrl+F**: Find/Search
+- **Ctrl+G** or **F3**: Find next
+- **Ctrl+Shift+G** or **Shift+F3**: Find previous
+- **Escape**: Close search
+- **Ctrl+Plus**: Zoom in
+- **Ctrl+Minus**: Zoom out
+- **Ctrl+0**: Reset zoom
+- **Ctrl+X**: Cut line (when no selection)
+- **Ctrl+Up/Down**: Move line up/down
+- **Tab**: Indent bullet point
+- **Shift+Tab**: Outdent bullet point
+
+## Markdown Syntax
+
+- **Headers**: # H1, ## H2, ### H3, etc.
+- **Bold**: **text** or __text__
+- **Italic**: *text* or _text_
+- **Code**: \`code\`
+- **Code block**: \`\`\`code\`\`\`
+- **Strikethrough**: ~~text~~
+- **Underline**: ++text++
+- **Links**: [text](url)
+- **Bullets**: - item or * item
+- **Todos**: [ ] unchecked or [X] checked
+
+## Where are my notes saved?
+
+By default, notes are saved in: ~/Documents/Jotite/
+
+You can change this location by editing the settings.json file (click the ⚙ icon) and modifying the "notesPath" setting.
+
+## How do I customize the theme?
+
+Jotite follows the Alacritty theme at: ~/.config/omarchy/current/theme/alacritty.toml
+
+## Questions?
+
+Edit this FAQ.md file to add your own questions and answers!
+`;
+                
+                faqFile.replace_contents(defaultFAQ, null, false, 
+                    Gio.FileCreateFlags.NONE, null);
+                print('Created default FAQ.md');
+            }
+            
+            // Open in a new window
+            this.application.vfunc_open([faqFile], '');
+        } catch (e) {
+            print(`Error opening FAQ: ${e.message}`);
+            this._showFeedback(`✗ Error opening FAQ: ${e.message}`);
+        }
+    }
+
+    _openFileLocation() {
+        try {
+            let fileToShow = null;
+            
+            if (this._currentFilePath) {
+                // If file is saved, show it in the file browser
+                fileToShow = this._currentFilePath;
+            } else {
+                // If not saved, show the Jotite directory
+                fileToShow = FileManager.getJotDirectory(this._settingsManager);
+            }
+            
+            // Try to open with file manager showing the file selected
+            // First try using dbus to call the file manager with ShowItems
+            try {
+                const file = Gio.File.new_for_path(fileToShow);
+                const uri = file.get_uri();
+                
+                // Try org.freedesktop.FileManager1 interface (works with most file managers)
+                GLib.spawn_command_line_async(`dbus-send --session --print-reply --dest=org.freedesktop.FileManager1 --type=method_call /org/freedesktop/FileManager1 org.freedesktop.FileManager1.ShowItems array:string:"${uri}" string:""`);
+                print(`Opened file location: ${fileToShow}`);
+            } catch (e) {
+                // Fallback: just open the parent directory
+                print(`DBus method failed, using fallback: ${e.message}`);
+                const file = Gio.File.new_for_path(fileToShow);
+                let dirToOpen;
+                
+                if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) === Gio.FileType.DIRECTORY) {
+                    dirToOpen = fileToShow;
+                } else {
+                    dirToOpen = GLib.path_get_dirname(fileToShow);
+                }
+                
+                GLib.spawn_command_line_async(`xdg-open "${dirToOpen}"`);
+                print(`Opened directory: ${dirToOpen}`);
+            }
+        } catch (e) {
+            print(`Error opening file location: ${e.message}`);
+            this._showFeedback(`✗ Error: ${e.message}`);
         }
     }
 });
@@ -3420,3 +4869,4 @@ class JotWindow extends Adw.ApplicationWindow {
 
 const app = new JotApplication();
 app.run([imports.system.programInvocationName].concat(ARGV));
+
