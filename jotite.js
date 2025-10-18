@@ -1588,7 +1588,6 @@ class MarkdownRenderer {
                 if (isEmoji) {
                     // For emojis: only apply the emoji scale tag (not the gradient tag)
                     // The emoji tag already has the correct scaled-down size
-                    print(`Detected emoji '${char}' at position ${i}, applying emoji-h${styleLevel} tag only`);
                     this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
                 } else {
                     // For regular text: apply the gradient tag with header scale
@@ -2123,7 +2122,6 @@ class MarkdownRenderer {
                 if (isEmoji) {
                     // For emojis: only apply the emoji scale tag (not the gradient tag)
                     // The emoji tag already has the correct scaled-down size
-                    print(`Detected emoji '${char}' at position ${i}, applying emoji-h${styleLevel} tag only`);
                     this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
                 } else {
                     // For regular text: apply the gradient tag with header scale
@@ -3035,32 +3033,29 @@ class JotWindow extends Adw.ApplicationWindow {
             const iter = buffer.get_iter_at_mark(cursor);
             const cursorOffset = iter.get_offset();
             
-            // Get all text and find current line
+            // Get current line using GTK's native line tracking (handles UTF-8 correctly)
+            const currentLineIter = iter.copy();
+            const currentLineNum = currentLineIter.get_line();
+            
+            // Get line start and end using GTK iterators (this handles multi-byte chars correctly)
+            const lineStart = currentLineIter.copy();
+            lineStart.set_line_offset(0);
+            const lineStartOffset = lineStart.get_offset();
+            
+            const lineEnd = currentLineIter.copy();
+            lineEnd.set_line_offset(0);
+            if (!lineEnd.ends_line()) {
+                lineEnd.forward_to_line_end();
+            }
+            const lineEndOffset = lineEnd.get_offset();
+            
+            // Get the line text
+            const lineText = buffer.get_text(lineStart, lineEnd, false);
+            
+            // Get all text for debugging/context only
             const [start, end] = buffer.get_bounds();
             const allText = buffer.get_text(start, end, false);
             const lines = allText.split('\n');
-            
-            // Find which line we're on
-            let offset = 0;
-            let currentLineNum = 0;
-            let lineText = '';
-            let lineStartOffset = 0;
-            
-            for (let i = 0; i < lines.length; i++) {
-                const lineLength = lines[i].length;
-                if (cursorOffset >= offset && cursorOffset <= offset + lineLength) {
-                    currentLineNum = i;
-                    lineText = lines[i];
-                    lineStartOffset = offset;
-                    break;
-                }
-                offset += lineLength + 1; // +1 for newline
-            }
-            
-            if (lineText === undefined) {
-                lineText = lines[lines.length - 1] || '';
-                lineStartOffset = offset;
-            }
             
             // Handle Enter key and Numpad Enter
             if ((keyval === KEY_ENTER || keyval === KEY_KP_ENTER) && !(state & CTRL_MASK)) {
@@ -3138,7 +3133,13 @@ class JotWindow extends Adw.ApplicationWindow {
             
             // Handle Tab key (65289)
             if (keyval === 65289 && !(state & CTRL_MASK)) {
-                print('Tab key detected');
+                print('===== TAB KEY PRESSED =====');
+                print(`Current line number: ${currentLineNum}`);
+                print(`Current line text: "${lineText}"`);
+                print(`All lines in buffer: [${lines.length} lines total]`);
+                for (let i = 0; i < Math.min(lines.length, 20); i++) {
+                    print(`  Line ${i}: "${lines[i]}"`);
+                }
                 
                 // Check if we're on a header line first (headers take priority)
                 const headerMatch = lineText.match(/^(#{1,})(\s+)(.+)$/);
@@ -3181,6 +3182,7 @@ class JotWindow extends Adw.ApplicationWindow {
                 
                 // Check if there's a selection
                 const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
+                print(`Has selection: ${hasSelection}`);
                 
                 if (hasSelection) {
                     // Multi-line selection: indent all selected bullet lines
@@ -3210,7 +3212,7 @@ class JotWindow extends Adw.ApplicationWindow {
                         // Check if any selected lines are bullets
                         let anyBullets = false;
                         for (let i = firstLineNum; i <= lastLineNum; i++) {
-                            if (lines[i].match(/^(\s*)([-*])(\s+.*)$/)) {
+                            if (lines[i].match(/^(\s*)([-*])(\s*.*)$/)) {
                                 anyBullets = true;
                                 break;
                             }
@@ -3238,7 +3240,7 @@ class JotWindow extends Adw.ApplicationWindow {
                             
                             for (let i = 0; i < lines.length; i++) {
                                 if (i >= firstLineNum && i <= lastLineNum) {
-                                    const bulletMatch = lines[i].match(/^(\s*)([-*])(\s+.*)$/);
+                                    const bulletMatch = lines[i].match(/^(\s*)([-*])(\s*.*)$/);
                                     if (bulletMatch) {
                                         const [, indent, bullet, rest] = bulletMatch;
                                         newLines.push(`  ${indent}${bullet}${rest}`);
@@ -3281,28 +3283,39 @@ class JotWindow extends Adw.ApplicationWindow {
                     }
                 } else {
                     // Single line: original behavior
-                    const bulletMatch = lineText.match(/^(\s*)([-*])(\s+.*)$/);
+                    // Changed pattern from (\s+.*) to (\s*.*) to match bullets with no space or any content after
+                    const bulletMatch = lineText.match(/^(\s*)([-*])(\s*.*)$/);
                     if (bulletMatch) {
-                        print('Indenting bullet');
+                        print('===== TAB INDENT DEBUG =====');
+                        print(`Current line number: ${currentLineNum}`);
+                        print(`Current line text: "${lineText}"`);
+                        print(`Line length: ${lineText.length}`);
+                        print(`Calculated line offsets: ${lineStartOffset} to ${lineEndOffset}`);
+                        print(`Bullet match - indent: "${bulletMatch[1]}", bullet: "${bulletMatch[2]}", rest: "${bulletMatch[3]}"`);
+                        
                         const [, indent, bullet, rest] = bulletMatch;
                         const newLine = `  ${indent}${bullet}${rest}`;
+                        print(`New line will be: "${newLine}"`);
                         
                         // Wrap in user action for proper undo
                         buffer.begin_user_action();
                         
-                        // Get the iterator for the current cursor position and navigate to line start/end
-                        const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
-                        const lineStart = cursorIter.copy();
-                        lineStart.set_line_offset(0);
-                        const lineEnd = cursorIter.copy();
-                        lineEnd.set_line_offset(0);
-                        if (!lineEnd.ends_line()) {
-                            lineEnd.forward_to_line_end();
-                        }
+                        // Recreate iterators at the calculated offsets to ensure they're fresh
+                        const deleteStart = buffer.get_iter_at_offset(lineStartOffset);
+                        const deleteEnd = buffer.get_iter_at_offset(lineEndOffset);
                         
-                        buffer.delete(lineStart, lineEnd);
-                        const insertIter = buffer.get_iter_at_offset(lineStart.get_offset());
-                        buffer.insert(insertIter, newLine, -1);
+                        // Log what we're about to delete
+                        const textToDelete = buffer.get_text(deleteStart, deleteEnd, false);
+                        print(`About to delete from offset ${lineStartOffset} to ${lineEndOffset}: "${textToDelete}"`);
+                        
+                        // Delete the line content (deleteStart iterator will be at the deletion point after this)
+                        buffer.delete(deleteStart, deleteEnd);
+                        // Reuse deleteStart iterator which is now at the correct insertion point after deletion
+                        buffer.insert(deleteStart, newLine, -1);
+                        
+                        print(`Inserted: "${newLine}"`);
+                        print('===== END TAB INDENT DEBUG =====');
+                        
                         buffer.end_user_action();
                         
                         // Force immediate re-render to avoid visual glitch
@@ -3311,6 +3324,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         }
                         
                         return true;
+                    } else {
+                        print(`Tab: No bullet match for line: "${lineText}"`);
                     }
                 }
             }
@@ -3318,6 +3333,7 @@ class JotWindow extends Adw.ApplicationWindow {
             // Handle Shift+Tab key (ISO_Left_Tab = 65056)
             if (keyval === 65056) {
                 print('Shift+Tab detected');
+                print(`Current line text: "${lineText}"`);
                 
                 // Check if we're on a header line first (headers take priority)
                 const headerMatch = lineText.match(/^(#{2,})(\s+)(.+)$/);
@@ -3389,7 +3405,7 @@ class JotWindow extends Adw.ApplicationWindow {
                         // Check if any selected lines are bullets with indentation
                         let anyIndentedBullets = false;
                         for (let i = firstLineNum; i <= lastLineNum; i++) {
-                            if (lines[i].match(/^(\s+)([-*])(\s+.*)$/)) {
+                            if (lines[i].match(/^(\s+)([-*])(\s*.*)$/)) {
                                 anyIndentedBullets = true;
                                 break;
                             }
@@ -3417,7 +3433,7 @@ class JotWindow extends Adw.ApplicationWindow {
                             
                             for (let i = 0; i < lines.length; i++) {
                                 if (i >= firstLineNum && i <= lastLineNum) {
-                                    const bulletMatch = lines[i].match(/^(\s+)([-*])(\s+.*)$/);
+                                    const bulletMatch = lines[i].match(/^(\s+)([-*])(\s*.*)$/);
                                     if (bulletMatch) {
                                         const [, indent, bullet, rest] = bulletMatch;
                                         // Remove up to 2 spaces
@@ -3463,30 +3479,41 @@ class JotWindow extends Adw.ApplicationWindow {
                     }
                 } else {
                     // Single line: original behavior
-                    const bulletMatch = lineText.match(/^(\s+)([-*])(\s+.*)$/);
+                    // Changed pattern from (\s+.*) to (\s*.*) to match bullets with no space or any content after
+                    const bulletMatch = lineText.match(/^(\s+)([-*])(\s*.*)$/);
                     if (bulletMatch) {
-                        print('Outdenting bullet');
+                        print('===== SHIFT+TAB OUTDENT DEBUG =====');
+                        print(`Current line number: ${currentLineNum}`);
+                        print(`Current line text: "${lineText}"`);
+                        print(`Line length: ${lineText.length}`);
+                        print(`Calculated line offsets: ${lineStartOffset} to ${lineEndOffset}`);
+                        print(`Bullet match - indent: "${bulletMatch[1]}", bullet: "${bulletMatch[2]}", rest: "${bulletMatch[3]}"`);
+                        
                         const [, indent, bullet, rest] = bulletMatch;
                         // Remove up to 2 spaces
                         const newIndent = indent.length >= 2 ? indent.substring(2) : '';
                         const newLine = `${newIndent}${bullet}${rest}`;
+                        print(`New line will be: "${newLine}"`);
                         
                         // Wrap in user action for proper undo
                         buffer.begin_user_action();
                         
-                        // Get the iterator for the current cursor position and navigate to line start/end
-                        const cursorIter = buffer.get_iter_at_mark(buffer.get_insert());
-                        const lineStart = cursorIter.copy();
-                        lineStart.set_line_offset(0);
-                        const lineEnd = cursorIter.copy();
-                        lineEnd.set_line_offset(0);
-                        if (!lineEnd.ends_line()) {
-                            lineEnd.forward_to_line_end();
-                        }
+                        // Recreate iterators at the calculated offsets to ensure they're fresh
+                        const deleteStart = buffer.get_iter_at_offset(lineStartOffset);
+                        const deleteEnd = buffer.get_iter_at_offset(lineEndOffset);
                         
-                        buffer.delete(lineStart, lineEnd);
-                        const insertIter = buffer.get_iter_at_offset(lineStart.get_offset());
-                        buffer.insert(insertIter, newLine, -1);
+                        // Log what we're about to delete
+                        const textToDelete = buffer.get_text(deleteStart, deleteEnd, false);
+                        print(`About to delete from offset ${lineStartOffset} to ${lineEndOffset}: "${textToDelete}"`);
+                        
+                        // Delete the line content (deleteStart iterator will be at the deletion point after this)
+                        buffer.delete(deleteStart, deleteEnd);
+                        // Reuse deleteStart iterator which is now at the correct insertion point after deletion
+                        buffer.insert(deleteStart, newLine, -1);
+                        
+                        print(`Inserted: "${newLine}"`);
+                        print('===== END SHIFT+TAB OUTDENT DEBUG =====');
+                        
                         buffer.end_user_action();
                         
                         // Force immediate re-render to avoid visual glitch
@@ -3495,6 +3522,8 @@ class JotWindow extends Adw.ApplicationWindow {
                         }
                         
                         return true;
+                    } else {
+                        print(`Shift+Tab: No bullet match for line: "${lineText}"`);
                     }
                 }
             }
