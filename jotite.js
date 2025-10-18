@@ -2785,17 +2785,10 @@ class JotWindow extends Adw.ApplicationWindow {
         this._setupSettings();
         this._setupKeyboardShortcuts();
 
-        // Initialize with default header with today's date
-        const buffer = this._textView.get_buffer();
-        const now = GLib.DateTime.new_now_local();
-        const todayDate = now.format('%Y-%m-%d');
-        const initialText = `# ${todayDate}`;
-        buffer.set_text(initialText, -1);
-        this._savedContent = initialText;
-        this._hasUnsavedChanges = false;
-        const iter = buffer.get_iter_at_offset(initialText.length); // Position at end
-        buffer.place_cursor(iter);
-        
+        if (!this._loadExistingDefaultNote()) {
+            this._newFile();
+        }
+
         this._textView.grab_focus();
     }
 
@@ -4154,6 +4147,27 @@ class JotWindow extends Adw.ApplicationWindow {
         const prefix = this._hasUnsavedChanges ? '● ' : '';
         this._pathLabel.set_label(prefix + fullPath);
         this._pathLabel.set_tooltip_text(this._hasUnsavedChanges ? 'File not saved' : fullPath);
+    }
+
+    _loadExistingDefaultNote() {
+        try {
+            FileManager.ensureJotDirectoryExists();
+            const jotDir = FileManager.getJotDirectory();
+            const now = GLib.DateTime.new_now_local();
+            const todayDate = now.format('%Y-%m-%d');
+            const targetFilename = FileManager.generateFilename(todayDate);
+            const targetPath = GLib.build_filenamev([jotDir, targetFilename]);
+            const file = Gio.File.new_for_path(targetPath);
+
+            if (file.query_exists(null)) {
+                this.loadFile(file);
+                return true;
+            }
+        } catch (e) {
+            print(`Error loading default note: ${e.message}`);
+        }
+
+        return false;
     }
 
     _newFile() {
