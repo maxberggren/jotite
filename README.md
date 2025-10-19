@@ -1,6 +1,6 @@
 # Jotite
 
-**Jotite** - A lightweight, fun, distraction-free markdown note-taking app with live rendering and cursor-aware syntax hiding.
+**Jotite** - A whimsical, lightweight, distraction-free markdown note-taking app with live rendering.
 
 ## Demo
 
@@ -8,19 +8,19 @@ https://github.com/user-attachments/assets/6bb0a5ee-39ee-40ef-8ae7-403afd8ff62a
 
 ## Installation
 
-### Dependencies
+### From AUR (Arch Linux)
+
+```bash
+yay -S jotite
+```
+
+### Dependencies for development
 
 Make sure you have GJS and GTK4 installed:
 
 ```bash
 # Arch Linux
 sudo pacman -S gjs gtk4 libadwaita fontconfig
-```
-
-### From AUR (Arch Linux)
-
-```bash
-yay -S jotite
 ```
 
 ## Features
