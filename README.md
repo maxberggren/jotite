@@ -1,6 +1,6 @@
 # Jotite
 
-**Jotite** - A whimsical, lightweight, distraction-free markdown note-taking app with live rendering.
+**Jotite** - A whimsical, lightweight, distraction-free Linux markdown note-taking app with live rendering.
 
 ## Demo
 
