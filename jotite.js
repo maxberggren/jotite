@@ -2675,6 +2675,47 @@ class JotApplication extends Adw.Application {
         
         // Ensure font is installed
         this._ensureFontInstalled();
+        
+        // Set up quit handler to check for unsaved changes
+        this._setupQuitHandler();
+    }
+    
+    _setupQuitHandler() {
+        // Create a quit action that checks for unsaved changes first
+        const quitAction = new Gio.SimpleAction({ name: 'quit' });
+        quitAction.connect('activate', () => {
+            this._handleQuit();
+        });
+        this.add_action(quitAction);
+        
+        // Set Ctrl+Q as the keyboard accelerator for quit
+        this.set_accels_for_action('app.quit', ['<Control>q']);
+    }
+    
+    _handleQuit() {
+        // Get all application windows
+        const windows = this.get_windows();
+        
+        // Check if any window has unsaved changes
+        const windowWithUnsavedChanges = windows.find(window => 
+            window._hasUnsavedChanges && window._hasUnsavedChanges === true
+        );
+        
+        if (windowWithUnsavedChanges) {
+            // Show dialog on the window with unsaved changes
+            windowWithUnsavedChanges._showUnsavedChangesDialog(() => {
+                // User chose to discard - quit the app
+                this.quit();
+            }, () => {
+                // User chose to save
+                windowWithUnsavedChanges._saveNote();
+                // Quit after save completes
+                this.quit();
+            });
+        } else {
+            // No unsaved changes, quit directly
+            this.quit();
+        }
     }
     
     _ensureFontInstalled() {
@@ -2811,6 +2852,7 @@ class JotWindow extends Adw.ApplicationWindow {
         this._setupTheme();
         this._setupSettings();
         this._setupKeyboardShortcuts();
+        this._setupCloseHandler();
 
         if (!this._loadExistingDefaultNote()) {
             this._newFile();
@@ -3909,7 +3951,7 @@ class JotWindow extends Adw.ApplicationWindow {
             label: 'Open',
         });
         openButton.add_css_class('jot-open-button');
-        openButton.connect('clicked', () => this._openFileDialog());
+        openButton.connect('clicked', () => this._handleOpenFile());
 
         const cancelButton = new Gtk.Button({ label: 'Cancel' });
         cancelButton.add_css_class('jot-button');
@@ -4329,11 +4371,11 @@ class JotWindow extends Adw.ApplicationWindow {
                 return true;
             }
             if (keyval === KEY_N && (state & CTRL_MASK)) {
-                this._newFile();
+                this._handleNewFile();
                 return true;
             }
             if (keyval === KEY_O && (state & CTRL_MASK)) {
-                this._openFileDialog();
+                this._handleOpenFile();
                 return true;
             }
             // Zoom in: Ctrl + or Ctrl = (multiple keycodes for compatibility)
@@ -4354,6 +4396,52 @@ class JotWindow extends Adw.ApplicationWindow {
             return false;
         });
         this.add_controller(keyController);
+    }
+
+    _setupCloseHandler() {
+        this.connect('close-request', () => {
+            if (this._hasUnsavedChanges) {
+                this._showUnsavedChangesDialog(() => {
+                    // User chose to discard, proceed with close
+                    this.destroy();
+                }, () => {
+                    // User chose to save
+                    this._saveNote();
+                    // Close after save completes
+                    this.destroy();
+                });
+                return true; // Prevent close
+            }
+            return false; // Allow close
+        });
+    }
+
+    _showUnsavedChangesDialog(onDiscard, onSave) {
+        const dialog = new Adw.AlertDialog({
+            heading: 'Unsaved Changes',
+            body: 'You have unsaved changes. Do you want to save before closing?',
+        });
+
+        dialog.add_response('cancel', 'Cancel');
+        dialog.add_response('discard', 'Discard');
+        dialog.add_response('save', 'Save');
+
+        dialog.set_response_appearance('discard', Adw.ResponseAppearance.DESTRUCTIVE);
+        dialog.set_response_appearance('save', Adw.ResponseAppearance.SUGGESTED);
+
+        dialog.set_default_response('save');
+        dialog.set_close_response('cancel');
+
+        dialog.connect('response', (dialog, response) => {
+            if (response === 'discard' && onDiscard) {
+                onDiscard();
+            } else if (response === 'save' && onSave) {
+                onSave();
+            }
+            // If cancel, do nothing
+        });
+
+        dialog.present(this);
     }
 
     _extractTitleFromContent() {
@@ -4411,6 +4499,38 @@ class JotWindow extends Adw.ApplicationWindow {
         }
 
         return false;
+    }
+
+    _handleNewFile() {
+        if (this._hasUnsavedChanges) {
+            this._showUnsavedChangesDialog(() => {
+                // User chose to discard
+                this._newFile();
+            }, () => {
+                // User chose to save
+                this._saveNote();
+                // Create new file after save
+                this._newFile();
+            });
+        } else {
+            this._newFile();
+        }
+    }
+
+    _handleOpenFile() {
+        if (this._hasUnsavedChanges) {
+            this._showUnsavedChangesDialog(() => {
+                // User chose to discard
+                this._openFileDialog();
+            }, () => {
+                // User chose to save
+                this._saveNote();
+                // Open file dialog after save
+                this._openFileDialog();
+            });
+        } else {
+            this._openFileDialog();
+        }
     }
 
     _newFile() {
