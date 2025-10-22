@@ -1284,6 +1284,12 @@ class MarkdownRenderer {
         // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
         this.buffer.connect('notify::cursor-position', () => {
             if (!this.updating && !this._textJustChanged && !this._searchMode) {
+                // Check if there's an active selection - if so, skip re-rendering
+                const [hasSelection] = this.buffer.get_selection_bounds();
+                if (hasSelection) {
+                    return; // Skip re-rendering during selection
+                }
+                
                 // Cancel previous timeout if exists
                 if (this._cursorTimeoutId) {
                     GLib.source_remove(this._cursorTimeoutId);
@@ -1295,6 +1301,26 @@ class MarkdownRenderer {
                     this._cursorTimeoutId = null;
                     return false;
                 });
+            }
+        });
+        
+        // Re-render markdown when selection is cleared/completed
+        this.buffer.connect('mark-set', (buffer, iter, mark) => {
+            // Only care about the selection bound mark
+            if (mark === buffer.get_selection_bound()) {
+                const [hasSelection] = buffer.get_selection_bounds();
+                if (!hasSelection && !this.updating && !this._textJustChanged) {
+                    // Selection was just cleared - schedule a re-render
+                    if (this._cursorTimeoutId) {
+                        GLib.source_remove(this._cursorTimeoutId);
+                    }
+                    this._cursorTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
+                        this._adjustCursorPosition();
+                        this._updateSyntaxVisibility();
+                        this._cursorTimeoutId = null;
+                        return false;
+                    });
+                }
             }
         });
     }
