@@ -115,16 +115,16 @@ class JotWindow extends Adw.ApplicationWindow {
             });
         });
 
+        // Setup line movement first (needed by bullet handlers)
+        this._lineMovement = new LineMovement(this._textView, this._markdownRenderer);
+        
         // Setup bullet list keyboard handlers
-        this._bulletHandlers = new BulletHandlers(this._textView, this._markdownRenderer);
+        this._bulletHandlers = new BulletHandlers(this._textView, this._markdownRenderer, this._lineMovement);
         this._bulletHandlers.setup();
         
         // Setup TODO box double-click handler
         this._todoHandlers = new TodoHandlers(this._textView, this._markdownRenderer);
         this._todoHandlers.setup();
-        
-        // Setup line movement
-        this._lineMovement = new LineMovement(this._textView, this._markdownRenderer);
 
         // Wrap in ScrolledWindow for scrolling
         const scrolledWindow = new Gtk.ScrolledWindow({
@@ -473,6 +473,16 @@ class JotWindow extends Adw.ApplicationWindow {
             // Reset zoom: Ctrl 0
             if (keyval === Constants.KEY_0 && (state & Constants.CTRL_MASK)) {
                 this._zoomReset();
+                return true;
+            }
+            // Move line up: Ctrl+Up
+            if (keyval === Constants.KEY_UP && (state & Constants.CTRL_MASK)) {
+                this._moveLineUp();
+                return true;
+            }
+            // Move line down: Ctrl+Down
+            if (keyval === Constants.KEY_DOWN && (state & Constants.CTRL_MASK)) {
+                this._moveLineDown();
                 return true;
             }
             return false;

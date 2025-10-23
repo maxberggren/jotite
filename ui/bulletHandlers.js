@@ -6,10 +6,11 @@ const { Constants } = imports.constants;
 // ============================================================================
 
 var BulletHandlers = class BulletHandlers {
-    constructor(textView, markdownRenderer) {
+    constructor(textView, markdownRenderer, lineMovement) {
         this.textView = textView;
         this.markdownRenderer = markdownRenderer;
         this.buffer = textView.get_buffer();
+        this.lineMovement = lineMovement;
     }
 
     setup() {
@@ -80,6 +81,18 @@ var BulletHandlers = class BulletHandlers {
         // Handle Ctrl+X: Cut entire line if no text is selected
         if (keyval === Constants.KEY_X && (state & Constants.CTRL_MASK)) {
             return this._handleCutLine();
+        }
+        
+        // Handle Ctrl+Up: Move line up
+        if (keyval === Constants.KEY_UP && (state & Constants.CTRL_MASK) && this.lineMovement) {
+            this.lineMovement.moveLineUp();
+            return true;
+        }
+        
+        // Handle Ctrl+Down: Move line down
+        if (keyval === Constants.KEY_DOWN && (state & Constants.CTRL_MASK) && this.lineMovement) {
+            this.lineMovement.moveLineDown();
+            return true;
         }
         
         return false;
