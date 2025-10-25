@@ -44,7 +44,7 @@ var TodoHandlers = class TodoHandlers {
         const clickOffset = iter.get_offset();
         const currentTime = Date.now();
         
-        // Find if we clicked on a TODO box
+        // Find if we clicked on a TODO box or TODO line
         const [start, end] = this.buffer.get_bounds();
         const text = this.buffer.get_text(start, end, false);
         
@@ -68,13 +68,15 @@ var TodoHandlers = class TodoHandlers {
                     const todoStart = lineStart + match.index;
                     const todoEnd = todoStart + 3; // Length of [ ] or [X]
                     
-                    // Check if click is within this TODO box
-                    if (clickOffset >= todoStart && clickOffset <= todoEnd) {
+                    // Check if this line has a TODO (anywhere on the line counts)
+                    if (match) {
                         clickedTodo = {
                             start: todoStart,
                             end: todoEnd,
                             isChecked: match[1] === 'X' || match[1] === 'x',
-                            checkChar: match[1]
+                            checkChar: match[1],
+                            lineStart: lineStart,
+                            lineEnd: lineEnd
                         };
                         break;
                     }
@@ -85,15 +87,16 @@ var TodoHandlers = class TodoHandlers {
             lineStart = lineEnd + 1; // +1 for newline
         }
         
-        // If we clicked on a TODO box
+        // If we clicked on a TODO line
         if (clickedTodo) {
             const timeSinceLastClick = currentTime - this.clickState.lastClickTime;
-            const isSameTodo = clickedTodo.start === this.clickState.lastClickOffset;
+            // Consider it the same TODO if we click anywhere on the same TODO line
+            const isSameTodo = clickedTodo.lineStart === this.clickState.lastClickOffset;
             
-            // Check if this is a double-click (within 400ms on the same TODO)
+            // Check if this is a double-click (within 400ms on the same TODO line)
             if (isSameTodo && timeSinceLastClick < 400) {
                 // Double-click detected - toggle the TODO status
-                print(`Double-click detected on TODO at offset ${clickedTodo.start}`);
+                print(`Double-click detected on TODO line at offset ${clickedTodo.lineStart}`);
                 
                 // Cancel the single-click timeout if it exists
                 if (this.clickState.timeoutId) {
@@ -141,10 +144,10 @@ var TodoHandlers = class TodoHandlers {
                 gesture.set_state(Gtk.EventSequenceState.CLAIMED);
             } else {
                 // First click - record it and wait for potential second click
-                print(`First click on TODO at offset ${clickedTodo.start}`);
+                print(`First click on TODO line at offset ${clickedTodo.lineStart}`);
                 
                 this.clickState.lastClickTime = currentTime;
-                this.clickState.lastClickOffset = clickedTodo.start;
+                this.clickState.lastClickOffset = clickedTodo.lineStart;
                 
                 // Set up a timeout to allow normal behavior if no second click comes
                 if (this.clickState.timeoutId) {
