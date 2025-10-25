@@ -1,6 +1,6 @@
 pkgbase = jotite
 	pkgdesc = A lightweight, fun, distraction-free markdown note-taking app with live markdown rendering
-	pkgver = 2.1.2
+	pkgver = 2.3.0
 	pkgrel = 1
 	url = https://github.com/maxberggren/omarchy-jotite
 	install = jotite.install
@@ -10,7 +10,7 @@ pkgbase = jotite
 	depends = gtk4
 	depends = libadwaita
 	depends = fontconfig
-	source = jotite-2.1.2.tar.gz::https://github.com/maxberggren/omarchy-jotite/archive/v2.1.2.tar.gz
-	sha256sums = 699045bc21d5a345b510f7f560891d38ae450134ea027cc46d47cbdfa78d08f4
+	source = jotite-2.3.0.tar.gz::https://github.com/maxberggren/omarchy-jotite/archive/v2.3.0.tar.gz
+	sha256sums = 14159ff857d5e7732d19b582786fd03b22a6fa51c1df769468260822dc199659
 
 pkgname = jotite
