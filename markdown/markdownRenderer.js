@@ -138,7 +138,8 @@ var MarkdownRenderer = class MarkdownRenderer {
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
          'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
          'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'bullet-star', 'bullet-star-near', 
-         'bullet-margin', 'sub-bullet-margin', 'dim', 'invisible', 'todo-unchecked', 'todo-checked',
+         'bullet-margin', 'sub-bullet-margin', 'numbered-list-number', 'numbered-list-margin', 'sub-numbered-list-margin',
+         'dim', 'invisible', 'todo-unchecked', 'todo-checked',
          'todo-unchecked-inside', 'todo-checked-inside', 'todo-checked-text',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
          'table-pipe', 'table-separator', 'table-header', 'table-cell', 'search-highlight', 'search-current',
@@ -385,6 +386,29 @@ var MarkdownRenderer = class MarkdownRenderer {
             pixels_below_lines: 1,  // Margin below sub-bullet items
         });
         tagTable.add(subBulletMarginTag);
+        
+        // Numbered list number styling (with reduced opacity, similar to bullet-dash)
+        const numberedListNumberTag = new Gtk.TextTag({
+            name: 'numbered-list-number',
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.5),
+        });
+        tagTable.add(numberedListNumberTag);
+        
+        // Numbered list line margins: persistent margins for main numbered items
+        const numberedListMarginTag = new Gtk.TextTag({
+            name: 'numbered-list-margin',
+            pixels_above_lines: 1,  // Margin above main numbered items
+            pixels_below_lines: 1,  // Margin below main numbered items
+        });
+        tagTable.add(numberedListMarginTag);
+        
+        // Sub-numbered list line margins: persistent margins for indented numbered items
+        const subNumberedListMarginTag = new Gtk.TextTag({
+            name: 'sub-numbered-list-margin',
+            pixels_above_lines: 1,  // Margin above sub-numbered items
+            pixels_below_lines: 1,  // Margin below sub-numbered items
+        });
+        tagTable.add(subNumberedListMarginTag);
         
         // Todo checkboxes: [ ] and [X]
         // Style to create a box appearance - when cursor is outside, only middle character visible
@@ -790,7 +814,7 @@ var MarkdownRenderer = class MarkdownRenderer {
         const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
          'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
          'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
-         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'todo-checked-text', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near',
+         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'todo-checked-text', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near', 'numbered-list-number',
          'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
          'table-pipe', 'table-separator', 'table-header', 'table-cell', 'hr-line', 'hr-line-dim'];
         
@@ -815,7 +839,7 @@ var MarkdownRenderer = class MarkdownRenderer {
             }
         }
         
-        // Remove only syntax tags, preserve margin tags (bullet, sub-bullet)
+        // Remove only syntax tags, preserve margin tags (bullet, sub-bullet, numbered-list, sub-numbered-list)
         tagsToRemove.forEach(tagName => {
             const tag = this.buffer.get_tag_table().lookup(tagName);
             if (tag) {
@@ -968,6 +992,29 @@ var MarkdownRenderer = class MarkdownRenderer {
             } else {
                 // Apply bullet margin for main bullets (0-1 spaces)
                 this._applyTag('bullet-margin', lineStart, lineEnd);
+            }
+        }
+        
+        // Numbered list points (e.g., "1. item" or "  1. item")
+        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
+        if (numberedMatch) {
+            const [, indent, number] = numberedMatch;
+            const numberStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
+            const numberEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + number.length + 1); // +1 for the dot
+            
+            // Apply numbered list number styling (dimmed)
+            this._applyTag('numbered-list-number', numberStart, numberEnd);
+            
+            // Apply margin styling to the entire line
+            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
+            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
+            
+            if (indent.length >= 3) {
+                // Apply sub-numbered-list margin for indented items (3+ spaces)
+                this._applyTag('sub-numbered-list-margin', lineStart, lineEnd);
+            } else {
+                // Apply numbered-list margin for main items (0-2 spaces)
+                this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
         }
         
@@ -1523,6 +1570,30 @@ var MarkdownRenderer = class MarkdownRenderer {
             } else {
                 // Apply bullet margin for main bullets (0-1 spaces)
                 this._applyTag('bullet-margin', lineStart, lineEnd);
+            }
+        }
+        
+        // Numbered list points (e.g., "1. item" or "  1. item")
+        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
+        if (numberedMatch) {
+            const [, indent, number] = numberedMatch;
+            const numberPos = lineOffset + indent.length;
+            const numberStart = this.buffer.get_iter_at_offset(numberPos);
+            const numberEnd = this.buffer.get_iter_at_offset(numberPos + number.length + 1); // +1 for the dot
+            
+            // Apply numbered list number styling (dimmed, similar to dash bullets)
+            this._applyTag('numbered-list-number', numberStart, numberEnd);
+            
+            // Apply margin styling to the entire line
+            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
+            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
+            
+            if (indent.length >= 3) {
+                // Apply sub-numbered-list margin for indented items (3+ spaces)
+                this._applyTag('sub-numbered-list-margin', lineStart, lineEnd);
+            } else {
+                // Apply numbered-list margin for main items (0-2 spaces)
+                this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
         }
         
