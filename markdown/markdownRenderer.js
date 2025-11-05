@@ -1,4 +1,4 @@
-const { Gtk, Gdk, GLib } = imports.gi;
+const { Gtk, Gdk, GLib, Pango } = imports.gi;
 
 // ============================================================================
 // Markdown Renderer
@@ -24,6 +24,8 @@ var MarkdownRenderer = class MarkdownRenderer {
         this._searchMode = false; // Track if we're in search mode to avoid interfering with selections
         this._isUndoRedoOperation = false; // Track if we're in an undo/redo operation
         this._undoRedoResetTimeoutId = null; // Track timeout for resetting undo/redo flag
+        this._indentTagCache = new Map(); // Cache for hanging indent tags keyed by pixel width
+        this._pangoLayout = null; // Cached Pango layout for measuring text width
         
         this._initTags();
         this._setupSignals();
@@ -668,6 +670,60 @@ var MarkdownRenderer = class MarkdownRenderer {
         this._appliedTags.add(tagName);
     }
     
+    // Get or create a hanging indent tag based on prefix width
+    _getHangingIndentTag(prefixText) {
+        // Always recreate the layout to ensure we have the current font settings
+        // This ensures accurate measurement even if font changes
+        this._pangoLayout = this.textView.create_pango_layout('');
+        
+        // Measure the prefix width
+        this._pangoLayout.set_text(prefixText, -1);
+        const [width] = this._pangoLayout.get_pixel_size();
+        
+        // Use width as key (rounded to avoid floating point issues)
+        // Round to nearest pixel for accuracy
+        const widthKey = Math.round(width);
+        
+        // Debug: log the measurement
+        if (widthKey > 0 && widthKey < 200) { // Sanity check range
+            print(`[Hanging Indent] Measured prefix "${prefixText.replace(/\s/g, '·')}" = ${widthKey} pixels`);
+        }
+        
+        // Check cache first
+        if (this._indentTagCache.has(widthKey)) {
+            const cachedName = this._indentTagCache.get(widthKey);
+            print(`[Hanging Indent] Using cached tag: ${cachedName}`);
+            return cachedName;
+        }
+        
+        // Create new indent tag
+        const tagTable = this.buffer.get_tag_table();
+        const tagName = `hanging-indent-${widthKey}`;
+        
+        // Check if tag already exists (shouldn't happen, but be safe)
+        let tag = tagTable.lookup(tagName);
+        if (!tag) {
+            // GTK hanging indent: use left_margin to push first line right, 
+            // then negative indent to pull wrapped lines back
+            // This creates the hanging effect where wrapped lines align with text content
+            print(`[Hanging Indent] Creating new tag: ${tagName} with left_margin=${widthKey}px, indent=-${widthKey}px`);
+            
+            tag = new Gtk.TextTag({
+                name: tagName,
+                left_margin: widthKey,  // Push entire paragraph right
+                indent: -widthKey,       // Pull wrapped lines back (negative = left relative to first line)
+            });
+            tagTable.add(tag);
+            print(`[Hanging Indent] Tag created and added to table`);
+        } else {
+            print(`[Hanging Indent] Tag ${tagName} already exists in table`);
+        }
+        
+        // Cache it
+        this._indentTagCache.set(widthKey, tagName);
+        return tagName;
+    }
+    
     _adjustCursorPosition() {
         if (this.updating) return;
         
@@ -847,6 +903,22 @@ var MarkdownRenderer = class MarkdownRenderer {
             }
         });
         
+        // Remove hanging indent tags (they will be re-applied if needed)
+        for (const tagName of this._indentTagCache.values()) {
+            const tag = this.buffer.get_tag_table().lookup(tagName);
+            if (tag) {
+                this.buffer.remove_tag(tag, start, end);
+            }
+        }
+        
+        // Also remove any hanging indent tags that might exist but aren't in cache
+        const tagTable = this.buffer.get_tag_table();
+        tagTable.foreach((tag) => {
+            if (tag.name && tag.name.startsWith('hanging-indent-')) {
+                this.buffer.remove_tag(tag, start, end);
+            }
+        });
+        
         // Iterate using TextIter to get correct byte offsets (handles multi-byte chars like emojis)
         let iter = this.buffer.get_start_iter();
         let inCodeBlock = false;
@@ -993,6 +1065,12 @@ var MarkdownRenderer = class MarkdownRenderer {
                 // Apply bullet margin for main bullets (0-1 spaces)
                 this._applyTag('bullet-margin', lineStart, lineEnd);
             }
+            
+            // Apply hanging indent: prefix is indent + bullet + space
+            const prefixText = indent + bullet + ' ';
+            const indentTagName = this._getHangingIndentTag(prefixText);
+            print(`[Hanging Indent APPLY _applyLineMarkdown] Applying tag "${indentTagName}" to bullet line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
+            this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
         // Numbered list points (e.g., "1. item" or "  1. item")
@@ -1016,6 +1094,12 @@ var MarkdownRenderer = class MarkdownRenderer {
                 // Apply numbered-list margin for main items (0-2 spaces)
                 this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
+            
+            // Apply hanging indent: prefix is indent + number + ". "
+            const prefixText = indent + number + '. ';
+            const indentTagName = this._getHangingIndentTag(prefixText);
+            print(`[Hanging Indent APPLY] Applying tag "${indentTagName}" to numbered line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
+            this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
         // Todo items: apply pattern for [ ] and [X] (but styling happens in cursor-aware version)
@@ -1571,6 +1655,12 @@ var MarkdownRenderer = class MarkdownRenderer {
                 // Apply bullet margin for main bullets (0-1 spaces)
                 this._applyTag('bullet-margin', lineStart, lineEnd);
             }
+            
+            // Apply hanging indent: prefix is indent + bullet + space
+            const prefixText = indent + bullet + ' ';
+            const indentTagName = this._getHangingIndentTag(prefixText);
+            print(`[Hanging Indent APPLY _applyLineMarkdownWithCursor] Applying tag "${indentTagName}" to bullet line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
+            this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
         // Numbered list points (e.g., "1. item" or "  1. item")
@@ -1595,6 +1685,12 @@ var MarkdownRenderer = class MarkdownRenderer {
                 // Apply numbered-list margin for main items (0-2 spaces)
                 this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
+            
+            // Apply hanging indent: prefix is indent + number + ". "
+            const prefixText = indent + number + '. ';
+            const indentTagName = this._getHangingIndentTag(prefixText);
+            print(`[Hanging Indent APPLY _applyLineMarkdownWithCursor] Applying tag "${indentTagName}" to numbered line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
+            this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
         // Todo items with cursor awareness
