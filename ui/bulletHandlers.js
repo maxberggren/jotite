@@ -487,12 +487,12 @@ var BulletHandlers = class BulletHandlers {
                             const bulletMatch = lines[i].match(/^(\s*)([-*])(\s*.*)$/);
                             if (bulletMatch) {
                                 const [, indent, bullet, rest] = bulletMatch;
-                                newLines.push(`  ${indent}${bullet}${rest}`);
+                                newLines.push(` ${indent}${bullet}${rest}`);
                                 
                                 if (i <= selStartLineNum) {
-                                    spacesAddedAtOrBeforeSelStart += 2;
+                                    spacesAddedAtOrBeforeSelStart += 1;
                                 }
-                                totalSpacesAdded += 2;
+                                totalSpacesAdded += 1;
                             } else {
                                 newLines.push(lines[i]);
                             }
@@ -557,7 +557,7 @@ var BulletHandlers = class BulletHandlers {
         if (bulletMatch) {
             print('===== TAB INDENT DEBUG =====');
             const [, indent, bullet, rest] = bulletMatch;
-            const newLine = `  ${indent}${bullet}${rest}`;
+            const newLine = ` ${indent}${bullet}${rest}`;
             
             this.buffer.begin_user_action();
             
@@ -694,7 +694,7 @@ var BulletHandlers = class BulletHandlers {
                             const bulletMatch = lines[i].match(/^(\s+)([-*])(\s*.*)$/);
                             if (bulletMatch) {
                                 const [, indent, bullet, rest] = bulletMatch;
-                                const spacesRemoved = Math.min(2, indent.length);
+                                const spacesRemoved = Math.min(1, indent.length);
                                 const newIndent = indent.substring(spacesRemoved);
                                 newLines.push(`${newIndent}${bullet}${rest}`);
                                 
@@ -767,7 +767,7 @@ var BulletHandlers = class BulletHandlers {
         if (bulletMatch) {
             print('===== SHIFT+TAB OUTDENT DEBUG =====');
             const [, indent, bullet, rest] = bulletMatch;
-            const newIndent = indent.length >= 2 ? indent.substring(2) : '';
+            const newIndent = indent.length >= 1 ? indent.substring(1) : '';
             const newLine = `${newIndent}${bullet}${rest}`;
             
             this.buffer.begin_user_action();

@@ -670,48 +670,56 @@ var MarkdownRenderer = class MarkdownRenderer {
         this._appliedTags.add(tagName);
     }
     
-    // Get or create a hanging indent tag based on prefix width
-    _getHangingIndentTag(prefixText) {
+    // Get or create a hanging indent tag based on indent and bullet/marker width
+    _getHangingIndentTag(indentText, markerText) {
         // Always recreate the layout to ensure we have the current font settings
         // This ensures accurate measurement even if font changes
         this._pangoLayout = this.textView.create_pango_layout('');
         
-        // Measure the prefix width
-        this._pangoLayout.set_text(prefixText, -1);
-        const [width] = this._pangoLayout.get_pixel_size();
+        // Measure the indentation width (leading spaces)
+        this._pangoLayout.set_text(indentText, -1);
+        const [indentWidth] = this._pangoLayout.get_pixel_size();
         
-        // Use width as key (rounded to avoid floating point issues)
-        // Round to nearest pixel for accuracy
-        const widthKey = Math.round(width);
+        // Measure the marker width (bullet/number + space)
+        this._pangoLayout.set_text(markerText, -1);
+        const [markerWidth] = this._pangoLayout.get_pixel_size();
+        
+        // Round to avoid floating point issues
+        const indentKey = Math.round(indentWidth);
+        const markerKey = Math.round(markerWidth);
+        const totalWidth = indentKey + markerKey;
+        
+        // Create unique key combining both widths
+        const cacheKey = `${indentKey}-${markerKey}`;
         
         // Debug: log the measurement
-        if (widthKey > 0 && widthKey < 200) { // Sanity check range
-            print(`[Hanging Indent] Measured prefix "${prefixText.replace(/\s/g, '·')}" = ${widthKey} pixels`);
-        }
+        print(`[Hanging Indent] Measured indent "${indentText.replace(/\s/g, '·')}" = ${indentKey}px, marker "${markerText.replace(/\s/g, '·')}" = ${markerKey}px, total = ${totalWidth}px`);
         
         // Check cache first
-        if (this._indentTagCache.has(widthKey)) {
-            const cachedName = this._indentTagCache.get(widthKey);
+        if (this._indentTagCache.has(cacheKey)) {
+            const cachedName = this._indentTagCache.get(cacheKey);
             print(`[Hanging Indent] Using cached tag: ${cachedName}`);
             return cachedName;
         }
         
         // Create new indent tag
         const tagTable = this.buffer.get_tag_table();
-        const tagName = `hanging-indent-${widthKey}`;
+        const tagName = `hanging-indent-${indentKey}-${markerKey}`;
         
         // Check if tag already exists (shouldn't happen, but be safe)
         let tag = tagTable.lookup(tagName);
         if (!tag) {
-            // GTK hanging indent: use left_margin to push first line right, 
-            // then negative indent to pull wrapped lines back
-            // This creates the hanging effect where wrapped lines align with text content
-            print(`[Hanging Indent] Creating new tag: ${tagName} with left_margin=${widthKey}px, indent=-${widthKey}px`);
+            // GTK hanging indent: 
+            // The text contains "  - Item text" where "  " is indent and "- " is marker
+            // - left_margin: position where wrapped lines should start (indent + marker width)
+            // - indent: negative offset to pull first line back to position 0
+            // Result: first line at 0 (renders "  - Item"), wrapped lines at indent+marker (align with "Item")
+            print(`[Hanging Indent] Creating new tag: ${tagName} with left_margin=${totalWidth}px, indent=-${totalWidth}px`);
             
             tag = new Gtk.TextTag({
                 name: tagName,
-                left_margin: widthKey,  // Push entire paragraph right
-                indent: -widthKey,       // Pull wrapped lines back (negative = left relative to first line)
+                left_margin: totalWidth,    // Wrapped lines align after indent + marker
+                indent: -totalWidth,         // First line starts at 0
             });
             tagTable.add(tag);
             print(`[Hanging Indent] Tag created and added to table`);
@@ -720,7 +728,7 @@ var MarkdownRenderer = class MarkdownRenderer {
         }
         
         // Cache it
-        this._indentTagCache.set(widthKey, tagName);
+        this._indentTagCache.set(cacheKey, tagName);
         return tagName;
     }
     
@@ -1045,7 +1053,7 @@ var MarkdownRenderer = class MarkdownRenderer {
         }
         
         // Bullet points (must be at start of line or after whitespace)
-        const bulletMatch = line.match(/^(\s*)([-*])\s+(.+)$/);
+        const bulletMatch = line.match(/^(\s*)([-*])\s+(.*)$/);
         if (bulletMatch) {
             const [, indent, bullet] = bulletMatch;
             const bulletStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
@@ -1058,23 +1066,23 @@ var MarkdownRenderer = class MarkdownRenderer {
             const lineStart = this.buffer.get_iter_at_offset(lineOffset);
             const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
             
-            if (indent.length >= 2) {
-                // Apply sub-bullet margin for indented bullets (2+ spaces)
+            if (indent.length >= 1) {
+                // Apply sub-bullet margin for indented bullets (1+ spaces)
                 this._applyTag('sub-bullet-margin', lineStart, lineEnd);
             } else {
-                // Apply bullet margin for main bullets (0-1 spaces)
+                // Apply bullet margin for main bullets (0 spaces)
                 this._applyTag('bullet-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: prefix is indent + bullet + space
-            const prefixText = indent + bullet + ' ';
-            const indentTagName = this._getHangingIndentTag(prefixText);
+            // Apply hanging indent: separate indent and marker
+            const markerText = bullet + ' ';
+            const indentTagName = this._getHangingIndentTag(indent, markerText);
             print(`[Hanging Indent APPLY _applyLineMarkdown] Applying tag "${indentTagName}" to bullet line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
         // Numbered list points (e.g., "1. item" or "  1. item")
-        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
+        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
         if (numberedMatch) {
             const [, indent, number] = numberedMatch;
             const numberStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
@@ -1095,9 +1103,9 @@ var MarkdownRenderer = class MarkdownRenderer {
                 this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: prefix is indent + number + ". "
-            const prefixText = indent + number + '. ';
-            const indentTagName = this._getHangingIndentTag(prefixText);
+            // Apply hanging indent: separate indent and marker
+            const markerText = number + '. ';
+            const indentTagName = this._getHangingIndentTag(indent, markerText);
             print(`[Hanging Indent APPLY] Applying tag "${indentTagName}" to numbered line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
@@ -1619,7 +1627,7 @@ var MarkdownRenderer = class MarkdownRenderer {
         }
         
         // Bullet points - handle * and - bullets
-        const bulletMatch = line.match(/^(\s*)([-*])\s+(.+)$/);
+        const bulletMatch = line.match(/^(\s*)([-*])\s+(.*)$/);
         if (bulletMatch) {
             const [, indent, bullet] = bulletMatch;
             const bulletPos = lineOffset + indent.length;
@@ -1648,23 +1656,23 @@ var MarkdownRenderer = class MarkdownRenderer {
             const lineStart = this.buffer.get_iter_at_offset(lineOffset);
             const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
             
-            if (indent.length >= 2) {
-                // Apply sub-bullet margin for indented bullets (2+ spaces)
+            if (indent.length >= 1) {
+                // Apply sub-bullet margin for indented bullets (1+ spaces)
                 this._applyTag('sub-bullet-margin', lineStart, lineEnd);
             } else {
-                // Apply bullet margin for main bullets (0-1 spaces)
+                // Apply bullet margin for main bullets (0 spaces)
                 this._applyTag('bullet-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: prefix is indent + bullet + space
-            const prefixText = indent + bullet + ' ';
-            const indentTagName = this._getHangingIndentTag(prefixText);
+            // Apply hanging indent: separate indent and marker
+            const markerText = bullet + ' ';
+            const indentTagName = this._getHangingIndentTag(indent, markerText);
             print(`[Hanging Indent APPLY _applyLineMarkdownWithCursor] Applying tag "${indentTagName}" to bullet line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
         // Numbered list points (e.g., "1. item" or "  1. item")
-        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
+        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
         if (numberedMatch) {
             const [, indent, number] = numberedMatch;
             const numberPos = lineOffset + indent.length;
@@ -1686,9 +1694,9 @@ var MarkdownRenderer = class MarkdownRenderer {
                 this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: prefix is indent + number + ". "
-            const prefixText = indent + number + '. ';
-            const indentTagName = this._getHangingIndentTag(prefixText);
+            // Apply hanging indent: separate indent and marker
+            const markerText = number + '. ';
+            const indentTagName = this._getHangingIndentTag(indent, markerText);
             print(`[Hanging Indent APPLY _applyLineMarkdownWithCursor] Applying tag "${indentTagName}" to numbered line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
