@@ -34,7 +34,6 @@ var LinkHandlers = class LinkHandlers {
         
         this.textView.add_controller(motionController);
         
-        print('Link click handler installed');
     }
 
     _handleMotion(controller, x, y) {
@@ -165,10 +164,9 @@ var LinkHandlers = class LinkHandlers {
             // Open URL in browser
             try {
                 GLib.spawn_command_line_async(`xdg-open "${url}"`);
-                print(`Opening URL: ${url}`);
-            } catch (e) {
-                print(`Error opening URL: ${e.message}`);
-            }
+                } catch (e) {
+                    // Error opening URL
+                }
         } else {
             // Treat as file path
             // Resolve relative paths relative to current file's directory
@@ -183,16 +181,14 @@ var LinkHandlers = class LinkHandlers {
             // Check if file exists
             const file = Gio.File.new_for_path(filePath);
             if (!file.query_exists(null)) {
-                print(`File does not exist: ${filePath}`);
                 return;
             }
             
             // Open file in the app
             try {
                 this.window.loadFile(file);
-                print(`Opening file: ${filePath}`);
             } catch (e) {
-                print(`Error opening file: ${e.message}`);
+                // Error opening file
             }
         }
     }

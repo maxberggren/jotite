@@ -692,13 +692,9 @@ var MarkdownRenderer = class MarkdownRenderer {
         // Create unique key combining both widths
         const cacheKey = `${indentKey}-${markerKey}`;
         
-        // Debug: log the measurement
-        print(`[Hanging Indent] Measured indent "${indentText.replace(/\s/g, '·')}" = ${indentKey}px, marker "${markerText.replace(/\s/g, '·')}" = ${markerKey}px, total = ${totalWidth}px`);
-        
         // Check cache first
         if (this._indentTagCache.has(cacheKey)) {
             const cachedName = this._indentTagCache.get(cacheKey);
-            print(`[Hanging Indent] Using cached tag: ${cachedName}`);
             return cachedName;
         }
         
@@ -714,17 +710,12 @@ var MarkdownRenderer = class MarkdownRenderer {
             // - left_margin: position where wrapped lines should start (indent + marker width)
             // - indent: negative offset to pull first line back to position 0
             // Result: first line at 0 (renders "  - Item"), wrapped lines at indent+marker (align with "Item")
-            print(`[Hanging Indent] Creating new tag: ${tagName} with left_margin=${totalWidth}px, indent=-${totalWidth}px`);
-            
             tag = new Gtk.TextTag({
                 name: tagName,
                 left_margin: totalWidth,    // Wrapped lines align after indent + marker
                 indent: -totalWidth,         // First line starts at 0
             });
             tagTable.add(tag);
-            print(`[Hanging Indent] Tag created and added to table`);
-        } else {
-            print(`[Hanging Indent] Tag ${tagName} already exists in table`);
         }
         
         // Cache it
@@ -1077,7 +1068,6 @@ var MarkdownRenderer = class MarkdownRenderer {
             // Apply hanging indent: separate indent and marker
             const markerText = bullet + ' ';
             const indentTagName = this._getHangingIndentTag(indent, markerText);
-            print(`[Hanging Indent APPLY _applyLineMarkdown] Applying tag "${indentTagName}" to bullet line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
@@ -1106,7 +1096,6 @@ var MarkdownRenderer = class MarkdownRenderer {
             // Apply hanging indent: separate indent and marker
             const markerText = number + '. ';
             const indentTagName = this._getHangingIndentTag(indent, markerText);
-            print(`[Hanging Indent APPLY] Applying tag "${indentTagName}" to numbered line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
@@ -1749,7 +1738,6 @@ var MarkdownRenderer = class MarkdownRenderer {
             // Apply hanging indent: separate indent and marker
             const markerText = bullet + ' ';
             const indentTagName = this._getHangingIndentTag(indent, markerText);
-            print(`[Hanging Indent APPLY _applyLineMarkdownWithCursor] Applying tag "${indentTagName}" to bullet line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
@@ -1779,7 +1767,6 @@ var MarkdownRenderer = class MarkdownRenderer {
             // Apply hanging indent: separate indent and marker
             const markerText = number + '. ';
             const indentTagName = this._getHangingIndentTag(indent, markerText);
-            print(`[Hanging Indent APPLY _applyLineMarkdownWithCursor] Applying tag "${indentTagName}" to numbered line at offset ${lineOffset}, line: "${line.substring(0, 30)}..."`);
             this._applyTag(indentTagName, lineStart, lineEnd);
         }
         
@@ -2004,7 +1991,7 @@ var MarkdownRenderer = class MarkdownRenderer {
             const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
             
             if (cursorInside) {
-                print(`Todo cursor INSIDE at ${cursorOffset}, range: ${matchStart}-${matchEnd}`);
+                // Cursor is inside the checkbox
             }
             
             // Apply the base tag for the entire checkbox

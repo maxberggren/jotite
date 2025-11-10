@@ -43,7 +43,6 @@ var SettingsManager = class SettingsManager {
         if (!configDirFile.query_exists(null)) {
             try {
                 configDirFile.make_directory_with_parents(null);
-                print(`Created config directory: ${configDir}`);
                 
                 // Copy default files from app directory
                 const appDir = this._getAppDirectory();
@@ -56,7 +55,6 @@ var SettingsManager = class SettingsManager {
                 
                 if (srcSettingsFile.query_exists(null)) {
                     srcSettingsFile.copy(dstSettingsFile, Gio.FileCopyFlags.NONE, null, null);
-                    print(`Copied settings.json from ${srcSettingsPath}`);
                 }
                 
                 // Copy FAQ.md
@@ -67,7 +65,6 @@ var SettingsManager = class SettingsManager {
                 
                 if (srcFaqFile.query_exists(null)) {
                     srcFaqFile.copy(dstFaqFile, Gio.FileCopyFlags.NONE, null, null);
-                    print(`Copied FAQ.md from ${srcFaqPath}`);
                 }
             } catch (e) {
                 print(`Warning: Error setting up config directory: ${e.message}`);
@@ -106,13 +103,11 @@ var SettingsManager = class SettingsManager {
             const file = Gio.File.new_for_path(settingsPath);
             
             if (!file.query_exists(null)) {
-                print('Settings file does not exist, using defaults');
                 return this._getDefaultSettings();
             }
 
             const [success, contents] = file.load_contents(null);
             if (!success) {
-                print('Failed to load settings file');
                 return this._getDefaultSettings();
             }
 
@@ -128,16 +123,12 @@ var SettingsManager = class SettingsManager {
             text = text.replace(/,(\s*[}\]])/g, '$1');
             
             const settings = JSON.parse(text);
-            print(`Loaded settings: headerMoods length = ${settings.headerMoods ? settings.headerMoods.length : 'none'}`);
             
             // Merge with defaults to ensure all keys exist
             const defaults = this._getDefaultSettings();
             return Object.assign({}, defaults, settings);
         } catch (e) {
             print(`Error loading settings: ${e.message}`);
-            if (text) {
-                print(`Settings text was: ${text.substring(0, 200)}...`);
-            }
             return this._getDefaultSettings();
         }
     }
@@ -149,13 +140,11 @@ var SettingsManager = class SettingsManager {
             
             this.monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
             this.monitor.connect('changed', (monitor, file, otherFile, eventType) => {
-                print(`Settings file event: ${eventType}`);
                 // CHANGES_DONE_HINT = 0, DELETED = 1, CREATED = 2, ATTRIBUTE_CHANGED = 3, 
                 // PRE_UNMOUNT = 4, UNMOUNTED = 5, MOVED = 6, RENAMED = 7, MOVED_IN = 8, MOVED_OUT = 9
                 if (eventType === Gio.FileMonitorEvent.CHANGES_DONE_HINT || 
                     eventType === Gio.FileMonitorEvent.CREATED ||
                     eventType === Gio.FileMonitorEvent.ATTRIBUTE_CHANGED) {
-                    print('Settings file changed, reloading...');
                     // Add a small delay to ensure file write is complete
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
                         this.settings = this._loadSettings();
@@ -164,7 +153,6 @@ var SettingsManager = class SettingsManager {
                     });
                 }
             });
-            print('Monitoring settings file for changes');
         } catch (e) {
             print(`Failed to setup settings monitor: ${e.message}`);
         }

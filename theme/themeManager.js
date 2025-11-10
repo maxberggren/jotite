@@ -108,7 +108,6 @@ var ThemeManager = class ThemeManager {
             const file = Gio.File.new_for_path(themePath);
             this.monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
             this.monitor.connect('changed', () => {
-                print('Alacritty theme file changed, reloading...');
                 this.colors = this._loadColors();
                 callback();
             });
@@ -121,11 +120,9 @@ var ThemeManager = class ThemeManager {
             if (gtkCssFile.query_exists(null)) {
                 this.gtkMonitor = gtkCssFile.monitor_file(Gio.FileMonitorFlags.NONE, null);
                 this.gtkMonitor.connect('changed', () => {
-                    print('GTK CSS file changed, reloading...');
                     this.colors = this._loadColors();
                     callback();
                 });
-                print('Monitoring GTK CSS file for changes');
             }
         } catch (e) {
             print(`Failed to setup theme monitor: ${e.message}`);

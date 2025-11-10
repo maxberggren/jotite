@@ -70,11 +70,8 @@ class JotApplication extends Adw.Application {
             const fontList = new TextDecoder().decode(checkOutput);
             
             if (fontList.toLowerCase().includes('pxlxxl')) {
-                print('Font pxlxxl already installed');
                 return;
             }
-            
-            print('Font pxlxxl not found, installing...');
             
             // Try multiple methods to find the script directory
             let scriptPath = null;
@@ -82,7 +79,6 @@ class JotApplication extends Adw.Application {
             // Method 1: Try using imports.system.programInvocationName (the actual script path)
             if (imports.system.programInvocationName) {
                 const invocationPath = imports.system.programInvocationName;
-                print(`Trying invocation path: ${invocationPath}`);
                 if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
                     scriptPath = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
                 }
@@ -91,17 +87,14 @@ class JotApplication extends Adw.Application {
             // Method 2: Try programPath
             if (!scriptPath) {
                 scriptPath = GLib.path_get_dirname(imports.system.programPath);
-                print(`Trying program path: ${scriptPath}`);
             }
             
             // Method 3: Check current directory
             if (!scriptPath || scriptPath === '/usr/bin') {
                 scriptPath = GLib.get_current_dir();
-                print(`Trying current directory: ${scriptPath}`);
             }
             
             const fontSourcePath = GLib.build_filenamev([scriptPath, 'pxlxxl.ttf']);
-            print(`Looking for font at: ${fontSourcePath}`);
             
             // Check if font file exists in script directory
             const fontFile = Gio.File.new_for_path(fontSourcePath);
@@ -111,35 +104,27 @@ class JotApplication extends Adw.Application {
                 return;
             }
             
-            print('Found font file, installing...');
-            
             // Install to user fonts directory
             const fontDir = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'share', 'fonts', 'jotite']);
             const fontDirFile = Gio.File.new_for_path(fontDir);
             
             // Create directory if it doesn't exist
             if (!fontDirFile.query_exists(null)) {
-                print(`Creating font directory: ${fontDir}`);
                 fontDirFile.make_directory_with_parents(null);
             }
             
             // Copy font file
             const fontDestPath = GLib.build_filenamev([fontDir, 'pxlxxl.ttf']);
             const fontDestFile = Gio.File.new_for_path(fontDestPath);
-            print(`Copying font to: ${fontDestPath}`);
             fontFile.copy(fontDestFile, Gio.FileCopyFlags.OVERWRITE, null, null);
             
             // Update font cache
-            print('Updating font cache...');
             const updateCmd = ['fc-cache', '-f', fontDir];
             const [cacheSuccess, cacheOutput, cacheError] = GLib.spawn_command_line_sync(updateCmd.join(' '));
             
             if (!cacheSuccess) {
                 print(`Warning: fc-cache failed: ${new TextDecoder().decode(cacheError)}`);
             }
-            
-            print(`✓ Font installed successfully to ${fontDir}`);
-            print('  Note: You may need to restart the application for the font to be available');
         } catch (e) {
             print(`ERROR: Could not auto-install font: ${e.message}`);
             print(`Stack trace: ${e.stack || 'N/A'}`);

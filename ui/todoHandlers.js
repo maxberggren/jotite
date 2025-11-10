@@ -26,7 +26,6 @@ var TodoHandlers = class TodoHandlers {
         });
         
         this.textView.add_controller(clickGesture);
-        print('TODO double-click handler installed');
     }
 
     _handleClick(gesture, x, y) {
@@ -96,7 +95,6 @@ var TodoHandlers = class TodoHandlers {
             // Check if this is a double-click (within 400ms on the same TODO line)
             if (isSameTodo && timeSinceLastClick < 400) {
                 // Double-click detected - toggle the TODO status
-                print(`Double-click detected on TODO line at offset ${clickedTodo.lineStart}`);
                 
                 // Cancel the single-click timeout if it exists
                 if (this.clickState.timeoutId) {
@@ -144,7 +142,6 @@ var TodoHandlers = class TodoHandlers {
                 gesture.set_state(Gtk.EventSequenceState.CLAIMED);
             } else {
                 // First click - record it and wait for potential second click
-                print(`First click on TODO line at offset ${clickedTodo.lineStart}`);
                 
                 this.clickState.lastClickTime = currentTime;
                 this.clickState.lastClickOffset = clickedTodo.lineStart;
@@ -156,7 +153,6 @@ var TodoHandlers = class TodoHandlers {
                 
                 this.clickState.timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 400, () => {
                     // Timeout expired - let the normal single-click behavior happen
-                    print('Single-click timeout - showing markdown');
                     this.clickState.timeoutId = null;
                     
                     // Place cursor at the clicked position to show the markdown

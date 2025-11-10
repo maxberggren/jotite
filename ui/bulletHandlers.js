@@ -21,7 +21,6 @@ var BulletHandlers = class BulletHandlers {
         });
         
         this.textView.add_controller(keyController);
-        print('Bullet list handlers installed');
     }
 
     _handleKeyPress(keyval, keycode, state) {
@@ -99,7 +98,6 @@ var BulletHandlers = class BulletHandlers {
     }
 
     _handleToggleTodo(lineText, lineStartOffset, cursorOffset) {
-        print('Ctrl+T detected - attempting to toggle TODO');
         
         const todoMatch = lineText.match(/\[([ Xx])\]/);
         if (todoMatch) {
@@ -107,7 +105,6 @@ var BulletHandlers = class BulletHandlers {
             const todoStart = lineStartOffset + todoMatch.index;
             const todoEnd = todoStart + 3;
             
-            print(`Found TODO at offset ${todoStart}, isChecked: ${isChecked}`);
             
             const savedCursorOffset = cursorOffset;
             
@@ -130,45 +127,35 @@ var BulletHandlers = class BulletHandlers {
                 this.markdownRenderer._updateSyntaxVisibility();
             }
             
-            print('TODO toggled successfully');
             return true;
-        } else {
-            print('No TODO found on current line');
         }
         return false;
     }
 
     _handleEnter(lineText, iter) {
-        print('Enter key detected on bullet list handler');
         
         // Check for numbered list first (e.g., "1. item" or "  1. item")
         const numberedMatch = lineText.match(/^(\s*)(\d+)\.\s+(.*)$/);
         if (numberedMatch) {
-            print('Numbered list line detected!');
             return this._handleNumberedListEnter(lineText, iter, numberedMatch);
         }
         
         // Check for regular bullet list
         const bulletMatch = lineText.match(/^(\s*)([-*])\s+(.*)$/);
         if (bulletMatch) {
-            print('Bullet line detected!');
             const [, indent, bullet, content] = bulletMatch;
             
             const cursorLineOffset = iter.get_line_offset();
             const lineLength = lineText.length;
             const isCursorAtEnd = cursorLineOffset === lineLength;
             
-            print(`Cursor position: ${cursorLineOffset}, Line length: ${lineLength}, At end: ${isCursorAtEnd}`);
-            
             if (!isCursorAtEnd) {
-                print('Cursor not at end of line, allowing default Enter behavior');
                 return false;
             }
             
             const hasTodo = content.match(/^\[([ Xx])\]\s*/);
             
             if (!content.trim() || (hasTodo && !content.slice(hasTodo[0].length).trim())) {
-                print('Empty bullet, removing');
                 
                 this.buffer.begin_user_action();
                 
@@ -192,7 +179,6 @@ var BulletHandlers = class BulletHandlers {
                 return true;
             }
             
-            print('Adding new bullet');
             let newBullet;
             if (hasTodo) {
                 newBullet = `\n${indent}${bullet} [ ] `;
@@ -217,10 +203,7 @@ var BulletHandlers = class BulletHandlers {
         const lineLength = lineText.length;
         const isCursorAtEnd = cursorLineOffset === lineLength;
         
-        print(`Numbered list - Cursor position: ${cursorLineOffset}, Line length: ${lineLength}, At end: ${isCursorAtEnd}`);
-        
         if (!isCursorAtEnd) {
-            print('Cursor not at end of line, need to insert item in middle');
             // When inserting in middle, add new item and renumber
             this.buffer.begin_user_action();
             
@@ -252,7 +235,6 @@ var BulletHandlers = class BulletHandlers {
         const hasTodo = content.match(/^\[([ Xx])\]\s*/);
         
         if (!content.trim() || (hasTodo && !content.slice(hasTodo[0].length).trim())) {
-            print('Empty numbered item, removing');
             
             this.buffer.begin_user_action();
             
@@ -276,7 +258,6 @@ var BulletHandlers = class BulletHandlers {
             return true;
         }
         
-        print('Adding new numbered item at end');
         const cursorIter = this.buffer.get_iter_at_mark(this.buffer.get_insert());
         const currentLineNum = cursorIter.get_line();
         const nextNum = parseInt(number) + 1;
@@ -371,9 +352,6 @@ var BulletHandlers = class BulletHandlers {
     }
 
     _handleTab(lineText, lines, currentLineNum, lineStartOffset, lineEndOffset, iter) {
-        print('===== TAB KEY PRESSED =====');
-        print(`Current line number: ${currentLineNum}`);
-        print(`Current line text: "${lineText}"`);
         
         // Check if we're on a header line first
         const headerMatch = lineText.match(/^(#{1,})(\s+)(.+)$/);
@@ -383,7 +361,6 @@ var BulletHandlers = class BulletHandlers {
         
         // Check if there's a selection
         const [hasSelection, selStart, selEnd] = this.buffer.get_selection_bounds();
-        print(`Has selection: ${hasSelection}`);
         
         if (hasSelection) {
             return this._indentMultipleLines(lines, selStart, selEnd);
@@ -393,7 +370,6 @@ var BulletHandlers = class BulletHandlers {
     }
 
     _indentHeader(headerMatch, iter, lineStartOffset) {
-        print('Increasing header level');
         const [, hashes, spaces, content] = headerMatch;
         const newLine = `#${hashes}${spaces}${content}`;
         
@@ -453,7 +429,6 @@ var BulletHandlers = class BulletHandlers {
             }
             
             if (anyListItems) {
-                print(`Indenting ${lastLineNum - firstLineNum + 1} lines`);
                 
                 let selStartLineNum = -1;
                 let lineOffset = 0;
@@ -528,7 +503,6 @@ var BulletHandlers = class BulletHandlers {
         // Check for numbered list first
         const numberedMatch = lineText.match(/^(\s*)(\d+)\.(\s*.*)$/);
         if (numberedMatch) {
-            print('===== TAB INDENT NUMBERED LIST =====');
             const [, indent, number, rest] = numberedMatch;
             const newLine = `   ${indent}${number}.${rest}`;  // 3 spaces for numbered lists
             
@@ -555,7 +529,6 @@ var BulletHandlers = class BulletHandlers {
         // Check for bullet list
         const bulletMatch = lineText.match(/^(\s*)([-*])(\s*.*)$/);
         if (bulletMatch) {
-            print('===== TAB INDENT DEBUG =====');
             const [, indent, bullet, rest] = bulletMatch;
             const newLine = ` ${indent}${bullet}${rest}`;
             
@@ -579,7 +552,6 @@ var BulletHandlers = class BulletHandlers {
     }
 
     _handleShiftTab(lineText, lines, currentLineNum, lineStartOffset, lineEndOffset, iter) {
-        print('Shift+Tab detected');
         
         // Check if we're on a header line first
         const headerMatch = lineText.match(/^(#{2,})(\s+)(.+)$/);
@@ -598,7 +570,6 @@ var BulletHandlers = class BulletHandlers {
     }
 
     _outdentHeader(headerMatch, iter, lineStartOffset) {
-        print('Decreasing header level');
         const [, hashes, spaces, content] = headerMatch;
         const newLine = `${hashes.substring(1)}${spaces}${content}`;
         
@@ -658,7 +629,6 @@ var BulletHandlers = class BulletHandlers {
             }
             
             if (anyIndentedItems) {
-                print(`Outdenting ${lastLineNum - firstLineNum + 1} lines`);
                 
                 let selStartLineNum = -1;
                 let lineOffset = 0;
@@ -737,7 +707,6 @@ var BulletHandlers = class BulletHandlers {
         // Check for numbered list first
         const numberedMatch = lineText.match(/^(\s+)(\d+)\.(\s*.*)$/);
         if (numberedMatch) {
-            print('===== SHIFT+TAB OUTDENT NUMBERED LIST =====');
             const [, indent, number, rest] = numberedMatch;
             const newIndent = indent.length >= 3 ? indent.substring(3) : '';  // Remove 3 spaces for numbered lists
             const newLine = `${newIndent}${number}.${rest}`;
@@ -765,7 +734,6 @@ var BulletHandlers = class BulletHandlers {
         // Check for bullet list
         const bulletMatch = lineText.match(/^(\s+)([-*])(\s*.*)$/);
         if (bulletMatch) {
-            print('===== SHIFT+TAB OUTDENT DEBUG =====');
             const [, indent, bullet, rest] = bulletMatch;
             const newIndent = indent.length >= 1 ? indent.substring(1) : '';
             const newLine = `${newIndent}${bullet}${rest}`;
@@ -790,11 +758,9 @@ var BulletHandlers = class BulletHandlers {
     }
 
     _handleCutLine() {
-        print('Ctrl+X detected in textview handler');
         const [hasSelection, selStart, selEnd] = this.buffer.get_selection_bounds();
         
         if (!hasSelection) {
-            print('No selection - cutting entire line');
             const cursor = this.buffer.get_insert();
             const iter = this.buffer.get_iter_at_mark(cursor);
             
@@ -815,10 +781,8 @@ var BulletHandlers = class BulletHandlers {
             
             this.buffer.delete(lineStart, lineEnd);
             
-            print('Line cut to clipboard');
             return true;
         }
-        print('Selection exists - using default cut');
         return false;
     }
 };

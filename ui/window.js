@@ -215,7 +215,6 @@ class JotWindow extends Adw.ApplicationWindow {
     _setupTheme() {
         this._applyCSS();
         this._themeManager.setupMonitor(() => {
-            print('Theme file changed, reloading...');
             this._reloadTheme();
         });
         
@@ -226,7 +225,6 @@ class JotWindow extends Adw.ApplicationWindow {
             
             // Monitor when GTK theme name changes
             gtkSettings.connect('notify::gtk-theme-name', () => {
-                print('GTK theme changed, scheduling reload...');
                 if (reloadTimeout) GLib.source_remove(reloadTimeout);
                 reloadTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
                     this._reloadTheme();
@@ -237,7 +235,6 @@ class JotWindow extends Adw.ApplicationWindow {
             
             // Monitor dark mode preference changes
             gtkSettings.connect('notify::gtk-application-prefer-dark-theme', () => {
-                print('Dark mode preference changed, scheduling reload...');
                 if (reloadTimeout) GLib.source_remove(reloadTimeout);
                 reloadTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
                     this._reloadTheme();
@@ -246,17 +243,14 @@ class JotWindow extends Adw.ApplicationWindow {
                 });
             });
             
-            print('GTK theme monitoring enabled');
         }
     }
     
     _reloadTheme() {
-        print('Reloading theme completely...');
         // Reload colors from file
         const oldBackground = this._themeManager.colors.background;
         this._themeManager.colors = this._themeManager._loadColors();
         const newBackground = this._themeManager.colors.background;
-        print(`Background color changed from ${oldBackground} to ${newBackground}`);
         // Apply new CSS
         this._applyCSS();
         // Force a full redraw
@@ -264,13 +258,11 @@ class JotWindow extends Adw.ApplicationWindow {
         if (this._textView) {
             this._textView.queue_draw();
         }
-        print('Theme reload complete');
     }
     
     _setupSettings() {
         // Setup settings file monitor
         this._settingsManager.setupMonitor(() => {
-            print('Settings changed, reloading...');
             this._applySettings();
         });
     }
@@ -320,14 +312,11 @@ class JotWindow extends Adw.ApplicationWindow {
         const headerMoods = this._settingsManager.get('headerMoods') || Object.keys(defaultMoods);
         const customMoods = this._settingsManager.get('customMoods') || {};
         
-        print(`Getting mood config: headerMoods = ${JSON.stringify(headerMoods.slice(0, 5))}...`);
-        
         // Filter out example/comment entries from customMoods
         const filteredCustomMoods = {};
         for (const [key, value] of Object.entries(customMoods)) {
             if (!key.startsWith('_') && Array.isArray(value)) {
                 filteredCustomMoods[key] = { colors: value };
-                print(`Added custom mood: ${key}`);
             }
         }
         
@@ -341,8 +330,6 @@ class JotWindow extends Adw.ApplicationWindow {
                 moodConfig[moodName] = allMoods[moodName];
             }
         }
-        
-        print(`Final mood config has ${Object.keys(moodConfig).length} moods: ${Object.keys(moodConfig).slice(0, 5).join(', ')}...`);
         
         return moodConfig;
     }
@@ -742,7 +729,6 @@ class JotWindow extends Adw.ApplicationWindow {
             this._hasUnsavedChanges = false;
             this._pathLabel.set_label(this._currentFilePath);
             
-            print(`Note saved to ${this._currentFilePath}`);
             this._showFeedback(`✓ Saved: ${this._currentFilename}`);
         } catch (e) {
             print(`Error writing file: ${e.message}`);
@@ -849,7 +835,8 @@ class JotWindow extends Adw.ApplicationWindow {
                 }
             } catch (e) {
                 if (!e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED)) {
-                    print(`Error opening file: ${e.message}`);
+                    const errorMsg = e.message || String(e);
+                    print(`Error opening file: ${errorMsg}`);
                 }
             }
         });
@@ -872,9 +859,9 @@ class JotWindow extends Adw.ApplicationWindow {
             this._hasUnsavedChanges = false;
             this._pathLabel.set_label(this._currentFilePath);
 
-            print(`Loaded file: ${this._currentFilePath}`);
         } catch (e) {
-            print(`Error loading file: ${e.message}`);
+            const errorMsg = e.message || String(e);
+            print(`Error loading file: ${errorMsg}`);
         }
     }
 
@@ -910,7 +897,6 @@ class JotWindow extends Adw.ApplicationWindow {
                 
                 settingsFile.replace_contents(defaultSettings, null, false, 
                     Gio.FileCreateFlags.NONE, null);
-                print('Created default settings.json');
             }
             
             // Open in a new window
@@ -983,7 +969,6 @@ Edit this FAQ.md file to add your own questions and answers!
                 
                 faqFile.replace_contents(defaultFAQ, null, false, 
                     Gio.FileCreateFlags.NONE, null);
-                print('Created default FAQ.md');
             }
             
             // Open in a new window
@@ -1014,7 +999,6 @@ Edit this FAQ.md file to add your own questions and answers!
                 
                 // Try org.freedesktop.FileManager1 interface (works with most file managers)
                 GLib.spawn_command_line_async(`dbus-send --session --print-reply --dest=org.freedesktop.FileManager1 --type=method_call /org/freedesktop/FileManager1 org.freedesktop.FileManager1.ShowItems array:string:"${uri}" string:""`);
-                print(`Opened file location: ${fileToShow}`);
             } catch (e) {
                 // Fallback: just open the parent directory
                 print(`DBus method failed, using fallback: ${e.message}`);
@@ -1028,7 +1012,6 @@ Edit this FAQ.md file to add your own questions and answers!
                 }
                 
                 GLib.spawn_command_line_async(`xdg-open "${dirToOpen}"`);
-                print(`Opened directory: ${dirToOpen}`);
             }
         } catch (e) {
             print(`Error opening file location: ${e.message}`);
