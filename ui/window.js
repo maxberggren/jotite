@@ -7,6 +7,7 @@ const { FileManager } = imports.file.fileManager;
 const { SearchBarComponent } = imports.ui.searchBar;
 const { BulletHandlers } = imports.ui.bulletHandlers;
 const { TodoHandlers } = imports.ui.todoHandlers;
+const { LinkHandlers } = imports.ui.linkHandlers;
 const { LineMovement } = imports.ui.lineMovement;
 const { StatusBarComponent } = imports.ui.statusBar;
 
@@ -125,6 +126,10 @@ class JotWindow extends Adw.ApplicationWindow {
         // Setup TODO box double-click handler
         this._todoHandlers = new TodoHandlers(this._textView, this._markdownRenderer);
         this._todoHandlers.setup();
+        
+        // Setup link Ctrl+click handler
+        this._linkHandlers = new LinkHandlers(this._textView, this._markdownRenderer, this);
+        this._linkHandlers.setup();
 
         // Wrap in ScrolledWindow for scrolling
         const scrolledWindow = new Gtk.ScrolledWindow({
