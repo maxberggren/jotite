@@ -1,4 +1,5 @@
 const { Gtk, GLib } = imports.gi;
+const { TextUtils } = imports.util.text;
 
 // ============================================================================
 // TODO Handlers Component
@@ -57,14 +58,14 @@ var TodoHandlers = class TodoHandlers {
         
         for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
             const line = lines[lineIdx];
-            const lineEnd = lineStart + line.length;
+            const lineEnd = lineStart + TextUtils.charLength(line);
             
             // Check if click is within this line
             if (clickOffset >= lineStart && clickOffset <= lineEnd) {
                 // Search for TODO patterns in this line
                 todoPattern.lastIndex = 0;
                 while ((match = todoPattern.exec(line)) !== null) {
-                    const todoStart = lineStart + match.index;
+                    const todoStart = lineStart + TextUtils.charLength(line.slice(0, match.index));
                     const todoEnd = todoStart + 3; // Length of [ ] or [X]
                     
                     // Check if this line has a TODO (anywhere on the line counts)

@@ -1,4 +1,5 @@
 const { GLib } = imports.gi;
+const { TextUtils } = imports.util.text;
 
 // ============================================================================
 // Line Movement Component
@@ -105,7 +106,7 @@ var LineMovement = class LineMovement {
             
             let selectionLength = 0;
             for (let i = 0; i < selectedLines.length; i++) {
-                selectionLength += selectedLines[i].length;
+                selectionLength += TextUtils.charLength(selectedLines[i]);
                 if (i < selectedLines.length - 1) {
                     selectionLength += 1; // newline
                 }
@@ -115,7 +116,7 @@ var LineMovement = class LineMovement {
             const newSelEndIter = this.buffer.get_iter_at_offset(newSelStartOffset + selectionLength);
             this.buffer.select_range(newSelStart, newSelEndIter);
         } else {
-            const newCursorOffset = deleteStartOffset + Math.min(cursorOffset, selectedLines[0].length);
+            const newCursorOffset = deleteStartOffset + Math.min(cursorOffset, TextUtils.charLength(selectedLines[0]));
             const newCursorIter = this.buffer.get_iter_at_offset(newCursorOffset);
             this.buffer.place_cursor(newCursorIter);
         }
@@ -228,12 +229,12 @@ var LineMovement = class LineMovement {
         this.buffer.delete_mark(insertMark);
         
         // Calculate new cursor position (one line down from original)
-        const newSelStartOffset = deleteStartOffset + targetLine.length + 1;
+        const newSelStartOffset = deleteStartOffset + TextUtils.charLength(targetLine) + 1;
         
         if (wasSelection) {
             let selectionLength = 0;
             for (let i = 0; i < selectedLines.length; i++) {
-                selectionLength += selectedLines[i].length;
+                selectionLength += TextUtils.charLength(selectedLines[i]);
                 if (i < selectedLines.length - 1) {
                     selectionLength += 1;
                 }
@@ -243,7 +244,7 @@ var LineMovement = class LineMovement {
             const newSelEndIter = this.buffer.get_iter_at_offset(newSelStartOffset + selectionLength);
             this.buffer.select_range(newSelStart, newSelEndIter);
         } else {
-            const newCursorOffset = newSelStartOffset + Math.min(cursorOffset, selectedLines[0].length);
+            const newCursorOffset = newSelStartOffset + Math.min(cursorOffset, TextUtils.charLength(selectedLines[0]));
             const newCursorIter = this.buffer.get_iter_at_offset(newCursorOffset);
             this.buffer.place_cursor(newCursorIter);
         }

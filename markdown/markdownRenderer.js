@@ -1,5 +1,9 @@
 const { Gtk, Gdk, GLib, Pango } = imports.gi;
 
+// Stand-in for characters outside the Basic Multilingual Plane (most emoji)
+// when matching markdown, see MarkdownRenderer._toBufferIndexed().
+const ASTRAL_PLACEHOLDER = '\uFFFC';
+
 // ============================================================================
 // Markdown Renderer
 // ============================================================================
@@ -105,6 +109,9 @@ var MarkdownRenderer = class MarkdownRenderer {
     }
     
     _isEmoji(char) {
+        // Lines are matched with astral characters replaced, see _toBufferIndexed()
+        if (char === ASTRAL_PLACEHOLDER) return true;
+        
         // Check if character is an emoji based on Unicode ranges
         const codePoint = char.codePointAt(0);
         if (!codePoint) return false;
@@ -127,8 +134,47 @@ var MarkdownRenderer = class MarkdownRenderer {
             (codePoint >= 0x25B6 && codePoint <= 0x25C0) ||   // Triangles
             (codePoint >= 0x25FB && codePoint <= 0x25FE) ||   // Squares
             (codePoint >= 0x2B50 && codePoint <= 0x2B55) ||   // Stars
-            (codePoint >= 0x203C && codePoint <= 0x3299)      // Various symbols
+            (codePoint >= 0x2B05 && codePoint <= 0x2B07) ||   // Heavy arrows
+            (codePoint >= 0x2B1B && codePoint <= 0x2B1C) ||   // Large squares
+            (codePoint >= 0x2194 && codePoint <= 0x2199) ||   // Arrows with emoji presentation
+            (codePoint >= 0x21A9 && codePoint <= 0x21AA) ||   // Hooked arrows
+            (codePoint >= 0x2934 && codePoint <= 0x2935) ||   // Curved arrows
+            codePoint === 0x203C || codePoint === 0x2049 ||   // ‼ ⁉
+            codePoint === 0x2122 || codePoint === 0x2139 ||   // ™ ℹ
+            codePoint === 0x24C2 ||                           // Ⓜ
+            codePoint === 0x3030 || codePoint === 0x303D ||   // 〰 〽
+            codePoint === 0x3297 || codePoint === 0x3299      // ㊗ ㊙
         );
+    }
+    
+    // GTK text buffer offsets count Unicode code points, while JS string
+    // indices count UTF-16 code units. Characters outside the BMP (most emoji)
+    // take two units, which would shift every offset computed after them.
+    // Replace each such character with a single placeholder so that string
+    // indices line up with buffer offsets; _isEmoji() recognises the placeholder.
+    _toBufferIndexed(line) {
+        return line.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ASTRAL_PLACEHOLDER);
+    }
+    
+    // Whether a header character should get the reduced "emoji" scale instead
+    // of the full header scale. The pixel header font only covers Latin text;
+    // emoji and any other glyph it lacks (CJK, Cyrillic, Arabic, arrows) come
+    // from a fallback font whose glyphs are far taller than the pixel font's,
+    // so they are scaled down to keep header lines a sensible height.
+    _needsFallbackScale(char) {
+        if (this._isEmoji(char)) return true;
+        
+        if (this._headerFont === undefined) {
+            try {
+                const desc = Pango.FontDescription.from_string('pxlxxl');
+                this._headerFont = this.textView.get_pango_context().load_font(desc);
+            } catch (e) {
+                this._headerFont = null;
+            }
+        }
+        if (!this._headerFont) return false;
+        
+        return !this._headerFont.has_char(char);
     }
     
     _initTags() {
@@ -483,6 +529,13 @@ var MarkdownRenderer = class MarkdownRenderer {
                 family: 'pxlxxl',
             });
             tagTable.add(dimHeadingTag);
+        }
+        
+        // Pango inserts a hyphen when it has to break inside a long word
+        // (URLs, identifiers); that would misrepresent the note's text.
+        // This tag is applied to the whole buffer and never removed.
+        if (!tagTable.lookup('no-hyphens')) {
+            tagTable.add(new Gtk.TextTag({ name: 'no-hyphens', insert_hyphens: false }));
         }
         
         // Invisible tag for markdown syntax (when cursor is outside)
@@ -947,6 +1000,8 @@ var MarkdownRenderer = class MarkdownRenderer {
             }
         });
         
+        this.buffer.apply_tag_by_name('no-hyphens', start, end);
+        
         // Iterate using TextIter to get correct byte offsets (handles multi-byte chars like emojis)
         let iter = this.buffer.get_start_iter();
         let inCodeBlock = false;
@@ -1001,12 +1056,21 @@ var MarkdownRenderer = class MarkdownRenderer {
             lineNum++;
         } while (iter.forward_line());
         
+        // An unterminated code block extends to the end of the document
+        if (inCodeBlock) {
+            const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
+            const [, bufferEnd] = this.buffer.get_bounds();
+            this._applyTag('code-block', blockStart, bufferEnd);
+        }
+        
         this.updating = false;
     }
     
     _applyLineMarkdown(line, lineOffset, lineNum) {
-        // Headers (must be at start of line) - support any number of hashes
-        const headerMatch = line.match(/^(#{1,})(\s+)(.+)$/);
+        line = this._toBufferIndexed(line);
+        
+        // Headers (must be at start of line), one to six hashes
+        const headerMatch = line.match(/^(#{1,6})(\s+)(.+)$/);
         if (headerMatch) {
             const [, hashes, spaces, content] = headerMatch;
             const actualLevel = hashes.length; // Actual number of hashes
@@ -1041,7 +1105,7 @@ var MarkdownRenderer = class MarkdownRenderer {
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
                 
                 // Check if this is an emoji - emojis need special handling
-                const isEmoji = this._isEmoji(char);
+                const isEmoji = this._needsFallbackScale(char);
                 
                 if (isEmoji) {
                     // For emojis: only apply the emoji scale tag (not the gradient tag)
@@ -1176,60 +1240,59 @@ var MarkdownRenderer = class MarkdownRenderer {
     }
     
     _applyItalicPatternSimple(line, lineOffset) {
-        // Match italic with * or _, but avoid matching ** or __
-        for (let i = 0; i < line.length; i++) {
-            if (line[i] === '*' && line[i+1] !== '*' && (i === 0 || line[i-1] !== '*')) {
-                // Found a potential opening *
-                for (let j = i + 1; j < line.length; j++) {
-                    if (line[j] === '*' && (j === line.length - 1 || line[j+1] !== '*') && line[j-1] !== '*') {
-                        // Found closing *
-                        const matchStart = lineOffset + i;
-                        const matchEnd = lineOffset + j + 1;
-                        const contentStart = matchStart + 1;
-                        const contentEnd = matchEnd - 1;
-                        
-                        const start = this.buffer.get_iter_at_offset(matchStart);
-                        const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this._applyTag('italic', start, end);
-                        
-                        const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                        const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                        this._applyTag('invisible', syntaxStart1, syntaxEnd1);
-                        
-                        const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                        const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                        this._applyTag('invisible', syntaxStart2, syntaxEnd2);
-                        break;
-                    }
-                }
-            } else if (line[i] === '_' && line[i+1] !== '_' && (i === 0 || line[i-1] !== '_')) {
-                // Found a potential opening _
-                for (let j = i + 1; j < line.length; j++) {
-                    if (line[j] === '_' && (j === line.length - 1 || line[j+1] !== '_') && line[j-1] !== '_') {
-                        // Found closing _
-                        const matchStart = lineOffset + i;
-                        const matchEnd = lineOffset + j + 1;
-                        const contentStart = matchStart + 1;
-                        const contentEnd = matchEnd - 1;
-                        
-                        const start = this.buffer.get_iter_at_offset(matchStart);
-                        const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this._applyTag('italic', start, end);
-                        
-                        const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                        const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                        this._applyTag('invisible', syntaxStart1, syntaxEnd1);
-                        
-                        const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                        const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                        this._applyTag('invisible', syntaxStart2, syntaxEnd2);
-                        break;
-                    }
-                }
-            }
+        for (const span of this._findItalicSpans(line)) {
+            this._applyItalicSpan(lineOffset + span.start, lineOffset + span.end, false);
         }
     }
     
+    // Find single-delimiter emphasis spans (*text* or _text_). Returns
+    // [{start, end}] indices into line, covering the delimiters. The rules
+    // follow CommonMark closely enough for notes: an opening delimiter must be
+    // followed by non-whitespace and a closing one preceded by non-whitespace,
+    // neither may be part of a doubled delimiter (** / __), and underscores
+    // inside a word (snake_case, file_names, URLs) never open or close a span.
+    _findItalicSpans(line) {
+        const spans = [];
+        const isWordChar = (ch) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+        const isSpace = (ch) => ch === undefined || /\s/.test(ch);
+        
+        let i = 0;
+        while (i < line.length) {
+            const d = line[i];
+            const opens = (d === '*' || d === '_')
+                && line[i + 1] !== d && line[i - 1] !== d
+                && !isSpace(line[i + 1])
+                && !(d === '_' && isWordChar(line[i - 1]));
+            
+            if (opens) {
+                let j = i + 2;
+                for (; j < line.length; j++) {
+                    const closes = line[j] === d
+                        && line[j + 1] !== d && line[j - 1] !== d
+                        && !isSpace(line[j - 1])
+                        && !(d === '_' && isWordChar(line[j + 1]));
+                    if (closes) break;
+                }
+                if (j < line.length) {
+                    spans.push({ start: i, end: j + 1 });
+                    i = j + 1;
+                    continue;
+                }
+            }
+            i++;
+        }
+        return spans;
+    }
+    
+    // Style one italic span; delimiters are dimmed when showSyntax, else hidden
+    _applyItalicSpan(matchStart, matchEnd, showSyntax) {
+        const syntaxTag = showSyntax ? 'dim' : 'invisible';
+        const at = (offset) => this.buffer.get_iter_at_offset(offset);
+        
+        this._applyTag('italic', at(matchStart), at(matchEnd));
+        this._applyTag(syntaxTag, at(matchStart), at(matchStart + 1));
+        this._applyTag(syntaxTag, at(matchEnd - 1), at(matchEnd));
+    }
     _applyPattern(line, lineOffset, regex, tagName) {
         let match;
         regex.lastIndex = 0;
@@ -1477,72 +1540,32 @@ var MarkdownRenderer = class MarkdownRenderer {
             if (!iter.forward_char()) break;
         }
         
-        // Apply transformations in reverse order to maintain offsets
+        // Apply replacements from the highest offset down. Each replacement
+        // only shifts text after it, so earlier offsets stay valid as recorded.
         transformations.sort((a, b) => b.offset - a.offset);
         
-        // Track cumulative offset adjustments from transformations that occur after (higher offsets)
-        // Since we process in reverse order, we need to adjust cursor positions for transformations
-        // that happen before (lower offsets) based on length changes from transformations after
-        let cumulativeOffsetAdjustment = 0;
         let finalCursorPos = null;
-        
         for (const transform of transformations) {
-            // Adjust offset for cumulative changes from previous transformations
-            const adjustedOffset = transform.offset + cumulativeOffsetAdjustment;
-            
-            // Validate that the offset is within bounds
-            const [start, end] = this.buffer.get_bounds();
-            const bufferLength = end.get_offset();
-            if (adjustedOffset < 0 || adjustedOffset >= bufferLength) {
-                // Skip invalid transformation
+            const [, bufferEnd] = this.buffer.get_bounds();
+            if (transform.offset + transform.length > bufferEnd.get_offset()) {
                 continue;
             }
             
-            // Validate that we're not trying to delete beyond buffer bounds
-            const deleteEnd = adjustedOffset + transform.length;
-            if (deleteEnd > bufferLength) {
-                // Adjust to only delete what's available
-                const actualLength = bufferLength - adjustedOffset;
-                if (actualLength <= 0) {
-                    continue; // Nothing to delete
-                }
-                // Use actual length instead of transform.length
-                const startIter = this.buffer.get_iter_at_offset(adjustedOffset);
-                const endIter = this.buffer.get_iter_at_offset(bufferLength);
-                this.buffer.delete(startIter, endIter);
-                
-                const insertIter = this.buffer.get_iter_at_offset(adjustedOffset);
-                this.buffer.insert(insertIter, transform.replacement, -1);
-                
-                // Calculate offset change based on actual deletion
-                const offsetChange = transform.replacement.length - actualLength;
-                
-                if (transform.cursorPos !== null) {
-                    finalCursorPos = transform.cursorPos + cumulativeOffsetAdjustment;
-                }
-                
-                cumulativeOffsetAdjustment += offsetChange;
-                continue;
-            }
-            
-            const startIter = this.buffer.get_iter_at_offset(adjustedOffset);
-            const endIter = this.buffer.get_iter_at_offset(adjustedOffset + transform.length);
+            const startIter = this.buffer.get_iter_at_offset(transform.offset);
+            const endIter = this.buffer.get_iter_at_offset(transform.offset + transform.length);
             this.buffer.delete(startIter, endIter);
             
-            const insertIter = this.buffer.get_iter_at_offset(adjustedOffset);
+            const insertIter = this.buffer.get_iter_at_offset(transform.offset);
             this.buffer.insert(insertIter, transform.replacement, -1);
             
-            // Calculate offset change: replacement length - deleted length
-            const offsetChange = transform.replacement.length - transform.length;
-            
-            // Adjust cursor position for cumulative offset changes from transformations at higher offsets
-            // (which have already been processed since we're going in reverse order)
             if (transform.cursorPos !== null) {
-                finalCursorPos = transform.cursorPos + cumulativeOffsetAdjustment;
+                // Replacements at lower offsets are applied afterwards and move
+                // this position by their change in length
+                const shift = transformations
+                    .filter(other => other.offset < transform.offset)
+                    .reduce((sum, other) => sum + (other.replacement.length - other.length), 0);
+                finalCursorPos = transform.cursorPos + shift;
             }
-            
-            // Update cumulative adjustment for next iteration (affects transforms at lower offsets)
-            cumulativeOffsetAdjustment += offsetChange;
         }
         
         // Set cursor position after all transformations are complete
@@ -1586,6 +1609,8 @@ var MarkdownRenderer = class MarkdownRenderer {
             }
         });
         this._appliedTags.clear(); // Clear for next render
+        
+        this.buffer.apply_tag_by_name('no-hyphens', start2, end2);
         
         // Find all markdown patterns and apply them
         // Show syntax markers only when cursor is inside the pattern
@@ -1665,11 +1690,27 @@ var MarkdownRenderer = class MarkdownRenderer {
             
             lineNum++;
         } while (iter.forward_line());
+        
+        // An unterminated code block extends to the end of the document.
+        // Keep its opening fence visible so it is clear why the rest is code.
+        if (inCodeBlock) {
+            const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
+            const [, bufferEnd] = this.buffer.get_bounds();
+            this._applyTag('code-block', blockStart, bufferEnd);
+            
+            const fenceEnd = codeBlockStartIter.copy();
+            if (!fenceEnd.ends_line()) {
+                fenceEnd.forward_to_line_end();
+            }
+            this._applyTag('dim', codeBlockStartIter, fenceEnd);
+        }
     }
     
     _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine, lineNum) {
-        // Headers (must be at start of line) - support any number of hashes
-        const headerMatch = line.match(/^(#{1,})(\s+)(.+)$/);
+        line = this._toBufferIndexed(line);
+        
+        // Headers (must be at start of line), one to six hashes
+        const headerMatch = line.match(/^(#{1,6})(\s+)(.+)$/);
         if (headerMatch) {
             const [, hashes, spaces, content] = headerMatch;
             const actualLevel = hashes.length; // Actual number of hashes
@@ -1710,7 +1751,7 @@ var MarkdownRenderer = class MarkdownRenderer {
                 const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
                 
                 // Check if this is an emoji - emojis need special handling
-                const isEmoji = this._isEmoji(char);
+                const isEmoji = this._needsFallbackScale(char);
                 
                 if (isEmoji) {
                     // For emojis: only apply the emoji scale tag (not the gradient tag)
@@ -1859,84 +1900,13 @@ var MarkdownRenderer = class MarkdownRenderer {
     }
     
     _applyItalicPattern(line, lineOffset, cursorOffset) {
-        // Match italic with * or _, but avoid matching ** or __
-        for (let i = 0; i < line.length; i++) {
-            if (line[i] === '*' && line[i+1] !== '*' && (i === 0 || line[i-1] !== '*')) {
-                // Found a potential opening *
-                for (let j = i + 1; j < line.length; j++) {
-                    if (line[j] === '*' && (j === line.length - 1 || line[j+1] !== '*') && line[j-1] !== '*') {
-                        // Found closing *
-                        const matchStart = lineOffset + i;
-                        const matchEnd = lineOffset + j + 1;
-                        const contentStart = matchStart + 1;
-                        const contentEnd = matchEnd - 1;
-                        
-                        const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
-                        
-                        const start = this.buffer.get_iter_at_offset(matchStart);
-                        const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this._applyTag('italic', start, end);
-                        
-                        if (cursorInside) {
-                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this._applyTag('dim', syntaxStart1, syntaxEnd1);
-                            
-                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this._applyTag('dim', syntaxStart2, syntaxEnd2);
-                        } else {
-                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this._applyTag('invisible', syntaxStart1, syntaxEnd1);
-                            
-                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this._applyTag('invisible', syntaxStart2, syntaxEnd2);
-                        }
-                        break;
-                    }
-                }
-            } else if (line[i] === '_' && line[i+1] !== '_' && (i === 0 || line[i-1] !== '_')) {
-                // Found a potential opening _
-                for (let j = i + 1; j < line.length; j++) {
-                    if (line[j] === '_' && (j === line.length - 1 || line[j+1] !== '_') && line[j-1] !== '_') {
-                        // Found closing _
-                        const matchStart = lineOffset + i;
-                        const matchEnd = lineOffset + j + 1;
-                        const contentStart = matchStart + 1;
-                        const contentEnd = matchEnd - 1;
-                        
-                        const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
-                        
-                        const start = this.buffer.get_iter_at_offset(matchStart);
-                        const end = this.buffer.get_iter_at_offset(matchEnd);
-                        this._applyTag('italic', start, end);
-                        
-                        if (cursorInside) {
-                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this._applyTag('dim', syntaxStart1, syntaxEnd1);
-                            
-                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this._applyTag('dim', syntaxStart2, syntaxEnd2);
-                        } else {
-                            const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                            const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                            this._applyTag('invisible', syntaxStart1, syntaxEnd1);
-                            
-                            const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                            const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                            this._applyTag('invisible', syntaxStart2, syntaxEnd2);
-                        }
-                        break;
-                    }
-                }
-            }
+        for (const span of this._findItalicSpans(line)) {
+            const matchStart = lineOffset + span.start;
+            const matchEnd = lineOffset + span.end;
+            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
+            this._applyItalicSpan(matchStart, matchEnd, cursorInside);
         }
     }
-    
     _applyPatternWithCursor(line, lineOffset, cursorOffset, regex, tagName) {
         let match;
         regex.lastIndex = 0;

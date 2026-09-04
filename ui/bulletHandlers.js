@@ -1,5 +1,6 @@
 const { Gtk, GLib } = imports.gi;
 const { Constants } = imports.constants;
+const { TextUtils } = imports.util.text;
 
 // ============================================================================
 // Bullet List Handlers Component
@@ -102,7 +103,7 @@ var BulletHandlers = class BulletHandlers {
         const todoMatch = lineText.match(/\[([ Xx])\]/);
         if (todoMatch) {
             const isChecked = todoMatch[1] === 'X' || todoMatch[1] === 'x';
-            const todoStart = lineStartOffset + todoMatch.index;
+            const todoStart = lineStartOffset + TextUtils.charLength(lineText.slice(0, todoMatch.index));
             const todoEnd = todoStart + 3;
             
             
@@ -146,7 +147,7 @@ var BulletHandlers = class BulletHandlers {
             const [, indent, bullet, content] = bulletMatch;
             
             const cursorLineOffset = iter.get_line_offset();
-            const lineLength = lineText.length;
+            const lineLength = TextUtils.charLength(lineText);
             const isCursorAtEnd = cursorLineOffset === lineLength;
             
             if (!isCursorAtEnd) {
@@ -200,7 +201,7 @@ var BulletHandlers = class BulletHandlers {
         const [, indent, number, content] = numberedMatch;
         
         const cursorLineOffset = iter.get_line_offset();
-        const lineLength = lineText.length;
+        const lineLength = TextUtils.charLength(lineText);
         const isCursorAtEnd = cursorLineOffset === lineLength;
         
         if (!isCursorAtEnd) {
@@ -211,8 +212,9 @@ var BulletHandlers = class BulletHandlers {
             const currentLineNum = cursorIter.get_line();
             
             // Split the current line at cursor position
-            const beforeCursor = lineText.substring(0, cursorLineOffset);
-            const afterCursor = lineText.substring(cursorLineOffset);
+            const cursorIndex = TextUtils.indexAt(lineText, cursorLineOffset);
+            const beforeCursor = lineText.substring(0, cursorIndex);
+            const afterCursor = lineText.substring(cursorIndex);
             
             // Get next number
             const nextNum = parseInt(number) + 1;
@@ -305,7 +307,7 @@ var BulletHandlers = class BulletHandlers {
         
         // Calculate offset to startLineNum
         for (let i = 0; i < startLineNum; i++) {
-            lineOffset += lines[i].length + 1; // +1 for newline
+            lineOffset += TextUtils.charLength(lines[i]) + 1; // +1 for newline
         }
         
         this.buffer.begin_user_action();
@@ -329,7 +331,7 @@ var BulletHandlers = class BulletHandlers {
             // If the number is already correct, we can stop
             if (parseInt(oldNum) === currentNumber) {
                 currentNumber++;
-                lineOffset += line.length + 1;
+                lineOffset += TextUtils.charLength(line) + 1;
                 continue;
             }
             
@@ -337,14 +339,14 @@ var BulletHandlers = class BulletHandlers {
             const newLine = `${indent}${currentNumber}. ${content}`;
             
             const lineStart = this.buffer.get_iter_at_offset(lineOffset);
-            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
+            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + TextUtils.charLength(line));
             
             this.buffer.delete(lineStart, lineEnd);
             
             const insertIter = this.buffer.get_iter_at_offset(lineOffset);
             this.buffer.insert(insertIter, newLine, -1);
             
-            lineOffset += newLine.length + 1;
+            lineOffset += TextUtils.charLength(newLine) + 1;
             currentNumber++;
         }
         
@@ -408,7 +410,7 @@ var BulletHandlers = class BulletHandlers {
         let lastLineNum = -1;
         
         for (let i = 0; i < lines.length; i++) {
-            const lineLength = lines[i].length;
+            const lineLength = TextUtils.charLength(lines[i]);
             const lineEndOffset = offset + lineLength;
             
             if (selStartOffset < lineEndOffset && selEndOffset > offset) {
@@ -433,12 +435,12 @@ var BulletHandlers = class BulletHandlers {
                 let selStartLineNum = -1;
                 let lineOffset = 0;
                 for (let i = 0; i < lines.length; i++) {
-                    const lineEnd = lineOffset + lines[i].length;
+                    const lineEnd = lineOffset + TextUtils.charLength(lines[i]);
                     if (selStartOffset >= lineOffset && selStartOffset <= lineEnd) {
                         selStartLineNum = i;
                         break;
                     }
-                    lineOffset += lines[i].length + 1;
+                    lineOffset += TextUtils.charLength(lines[i]) + 1;
                 }
                 
                 const newLines = [];
@@ -608,7 +610,7 @@ var BulletHandlers = class BulletHandlers {
         let lastLineNum = -1;
         
         for (let i = 0; i < lines.length; i++) {
-            const lineLength = lines[i].length;
+            const lineLength = TextUtils.charLength(lines[i]);
             const lineEndOffset = offset + lineLength;
             
             if (selStartOffset < lineEndOffset && selEndOffset > offset) {
@@ -633,12 +635,12 @@ var BulletHandlers = class BulletHandlers {
                 let selStartLineNum = -1;
                 let lineOffset = 0;
                 for (let i = 0; i < lines.length; i++) {
-                    const lineEnd = lineOffset + lines[i].length;
+                    const lineEnd = lineOffset + TextUtils.charLength(lines[i]);
                     if (selStartOffset >= lineOffset && selStartOffset <= lineEnd) {
                         selStartLineNum = i;
                         break;
                     }
-                    lineOffset += lines[i].length + 1;
+                    lineOffset += TextUtils.charLength(lines[i]) + 1;
                 }
                 
                 const newLines = [];
