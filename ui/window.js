@@ -349,6 +349,12 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _applyCSS() {
+        // Remember the font in effect before the CSS change so the renderer can
+        // be re-run once the new font (size or family) is actually live
+        const fontBefore = this._textView
+            ? this._textView.get_pango_context().get_font_description().to_string()
+            : null;
+        
         // Remove old CSS provider if it exists
         if (this._cssProvider) {
             Gtk.StyleContext.remove_provider_for_display(
@@ -370,6 +376,7 @@ class JotWindow extends Adw.ApplicationWindow {
         // Update markdown renderer colors
         if (this._markdownRenderer) {
             this._markdownRenderer.updateColors(this._themeManager.colors);
+            this._rerenderAfterStyleChange(fontBefore);
         }
     }
 
@@ -757,31 +764,44 @@ class JotWindow extends Adw.ApplicationWindow {
     _zoomIn() {
         this._zoomLevel = Math.min(this._zoomLevel + 10, 300); // Max 300%
         this._applyCSS();
-        // Trigger markdown re-render to update styling after zoom
-        if (this._markdownRenderer) {
-            this._markdownRenderer._updateSyntaxVisibility();
-        }
         this._showZoomLevel();
     }
 
     _zoomOut() {
         this._zoomLevel = Math.max(this._zoomLevel - 10, 50); // Min 50%
         this._applyCSS();
-        // Trigger markdown re-render to update styling after zoom
-        if (this._markdownRenderer) {
-            this._markdownRenderer._updateSyntaxVisibility();
-        }
         this._showZoomLevel();
     }
 
     _zoomReset() {
         this._zoomLevel = 100;
         this._applyCSS();
-        // Trigger markdown re-render to update styling after zoom
-        if (this._markdownRenderer) {
-            this._markdownRenderer._updateSyntaxVisibility();
-        }
         this._showZoomLevel();
+    }
+
+    // Re-render markdown once the text view's font reflects new CSS.
+    // CSS changes are applied lazily on a later frame, so list indentation
+    // measured right after _applyCSS() (zoom or theme change) would still use
+    // the previous font and misalign wrapped lines. Poll the text view's Pango
+    // context each frame until its font differs from fontBefore, then re-render.
+    // Falls back to re-rendering after a bounded number of frames in case the
+    // CSS change did not alter the font at all.
+    _rerenderAfterStyleChange(fontBefore) {
+        if (!this._markdownRenderer || !this._textView) return;
+        
+        const maxFrames = 30;
+        let frames = 0;
+        
+        this._textView.add_tick_callback(() => {
+            const fontNow = this._textView.get_pango_context().get_font_description().to_string();
+            frames++;
+            
+            if (fontNow !== fontBefore || frames >= maxFrames) {
+                this._markdownRenderer._updateSyntaxVisibility();
+                return GLib.SOURCE_REMOVE;
+            }
+            return GLib.SOURCE_CONTINUE;
+        });
     }
 
     _showZoomLevel() {

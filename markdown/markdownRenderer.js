@@ -24,8 +24,7 @@ var MarkdownRenderer = class MarkdownRenderer {
         this._searchMode = false; // Track if we're in search mode to avoid interfering with selections
         this._isUndoRedoOperation = false; // Track if we're in an undo/redo operation
         this._undoRedoResetTimeoutId = null; // Track timeout for resetting undo/redo flag
-        this._indentTagCache = new Map(); // Cache for hanging indent tags keyed by pixel width
-        this._pangoLayout = null; // Cached Pango layout for measuring text width
+        this._indentTagCache = new Map(); // List indent tag names keyed by extra indent + prefix width
         
         this._initTags();
         this._setupSignals();
@@ -670,57 +669,87 @@ var MarkdownRenderer = class MarkdownRenderer {
         this._appliedTags.add(tagName);
     }
     
-    // Get or create a hanging indent tag based on indent and bullet/marker width
-    _getHangingIndentTag(indentText, markerText) {
-        // Always recreate the layout to ensure we have the current font settings
-        // This ensures accurate measurement even if font changes
-        this._pangoLayout = this.textView.create_pango_layout('');
-        
-        // Measure the indentation width (leading spaces)
-        this._pangoLayout.set_text(indentText, -1);
-        const [indentWidth] = this._pangoLayout.get_pixel_size();
-        
-        // Measure the marker width (bullet/number + space)
-        this._pangoLayout.set_text(markerText, -1);
-        const [markerWidth] = this._pangoLayout.get_pixel_size();
-        
-        // Round to avoid floating point issues
-        const indentKey = Math.round(indentWidth);
-        const markerKey = Math.round(markerWidth);
-        const totalWidth = indentKey + markerKey;
-        
-        // Create unique key combining both widths
-        const cacheKey = `${indentKey}-${markerKey}`;
-        
-        // Check cache first
+    // Get or create a paragraph indent tag for a list line.
+    //   extraIndent: extra left margin so nested markers line up under the
+    //                parent's content (0 for top-level items)
+    //   prefixWidth: rendered width of indentation + marker (+ checkbox), used
+    //                as a hanging indent so wrapped lines align with the text
+    _getListIndentTag(extraIndent, prefixWidth) {
+        const cacheKey = `${extraIndent}-${prefixWidth}`;
         if (this._indentTagCache.has(cacheKey)) {
-            const cachedName = this._indentTagCache.get(cacheKey);
-            return cachedName;
+            return this._indentTagCache.get(cacheKey);
         }
         
-        // Create new indent tag
         const tagTable = this.buffer.get_tag_table();
-        const tagName = `hanging-indent-${indentKey}-${markerKey}`;
+        const tagName = `list-indent-${cacheKey}`;
         
-        // Check if tag already exists (shouldn't happen, but be safe)
         let tag = tagTable.lookup(tagName);
         if (!tag) {
-            // GTK hanging indent: 
-            // The text contains "  - Item text" where "  " is indent and "- " is marker
-            // - left_margin: position where wrapped lines should start (indent + marker width)
-            // - indent: negative offset to pull first line back to position 0
-            // Result: first line at 0 (renders "  - Item"), wrapped lines at indent+marker (align with "Item")
-            tag = new Gtk.TextTag({
-                name: tagName,
-                left_margin: totalWidth,    // Wrapped lines align after indent + marker
-                indent: -totalWidth,         // First line starts at 0
-            });
+            // Pango hanging indent: a negative indent leaves the first line at the
+            // paragraph's left margin and indents only the wrapped lines by |indent|.
+            //   first line starts at page margin + extraIndent ("  - [ ] Item")
+            //   wrapped lines start at page margin + extraIndent + prefixWidth
+            //   (aligned with "Item")
+            const props = { name: tagName, indent: -prefixWidth };
+            if (extraIndent > 0) {
+                // A tag's left_margin replaces the text view's own margin rather
+                // than adding to it, so include the view margin explicitly.
+                props.left_margin = this.textView.get_left_margin() + extraIndent;
+            }
+            tag = new Gtk.TextTag(props);
             tagTable.add(tag);
         }
         
-        // Cache it
         this._indentTagCache.set(cacheKey, tagName);
         return tagName;
+    }
+    
+    // Apply paragraph indentation to a list line.
+    //   item.indentLen   number of leading whitespace characters
+    //   item.markerLen   length of the marker including its trailing space ("- ", "1. ")
+    //   item.contentIdx  index into the line where the item's text starts
+    //                    (after any todo checkbox)
+    //   item.levelIndent when true, each leading space is rendered one marker
+    //                    width wide so a nested marker sits under the parent's
+    //                    first content character (bullets nest one space per
+    //                    level; numbered lists already use marker-width spacing)
+    // Widths are measured from the text view's real layout, so they reflect
+    // every tag already applied to the line (font size/zoom, checkbox scaling,
+    // letter spacing, hidden brackets). Call after all other line tags.
+    _applyListIndent(lineOffset, item) {
+        const lineStart = this.buffer.get_iter_at_offset(lineOffset);
+        const contentIter = this.buffer.get_iter_at_offset(lineOffset + item.contentIdx);
+        
+        // Use iters for the line end: JS string lengths count UTF-16 units, so
+        // emoji in the line would push an offset-based end into the next line
+        // (and paragraph attributes like indent would leak onto it).
+        const lineEnd = lineStart.copy();
+        if (!lineEnd.ends_line()) {
+            lineEnd.forward_to_line_end();
+        }
+        
+        const startRect = this.textView.get_iter_location(lineStart);
+        const contentRect = this.textView.get_iter_location(contentIter);
+        
+        // All measured positions are on the first visual line, so differences
+        // are rendered widths regardless of any margin currently applied.
+        if (contentRect.y !== startRect.y) return;
+        const prefixWidth = Math.round(contentRect.x - startRect.x);
+        if (prefixWidth <= 0) return;
+        
+        let extraIndent = 0;
+        if (item.levelIndent && item.indentLen > 0) {
+            const markerStart = this.buffer.get_iter_at_offset(lineOffset + item.indentLen);
+            const markerEnd = this.buffer.get_iter_at_offset(lineOffset + item.indentLen + item.markerLen);
+            const markerStartX = this.textView.get_iter_location(markerStart).x;
+            const markerEndX = this.textView.get_iter_location(markerEnd).x;
+            const spacesWidth = markerStartX - startRect.x;
+            const markerWidth = markerEndX - markerStartX;
+            // Make the leading spaces occupy one marker width per level
+            extraIndent = Math.max(0, Math.round(item.indentLen * markerWidth - spacesWidth));
+        }
+        
+        this._applyTag(this._getListIndentTag(extraIndent, prefixWidth), lineStart, lineEnd);
     }
     
     _adjustCursorPosition() {
@@ -902,7 +931,7 @@ var MarkdownRenderer = class MarkdownRenderer {
             }
         });
         
-        // Remove hanging indent tags (they will be re-applied if needed)
+        // Remove list indent tags (they will be re-applied if needed)
         for (const tagName of this._indentTagCache.values()) {
             const tag = this.buffer.get_tag_table().lookup(tagName);
             if (tag) {
@@ -910,10 +939,10 @@ var MarkdownRenderer = class MarkdownRenderer {
             }
         }
         
-        // Also remove any hanging indent tags that might exist but aren't in cache
+        // Also remove any list indent tags that might exist but aren't in cache
         const tagTable = this.buffer.get_tag_table();
         tagTable.foreach((tag) => {
-            if (tag.name && tag.name.startsWith('hanging-indent-')) {
+            if (tag.name && tag.name.startsWith('list-indent-')) {
                 this.buffer.remove_tag(tag, start, end);
             }
         });
@@ -1043,6 +1072,9 @@ var MarkdownRenderer = class MarkdownRenderer {
             return;
         }
         
+        // List item structure for paragraph indentation (null if not a list line)
+        let listItem = null;
+        
         // Bullet points (must be at start of line or after whitespace)
         const bulletMatch = line.match(/^(\s*)([-*])\s+(.*)$/);
         if (bulletMatch) {
@@ -1051,7 +1083,7 @@ var MarkdownRenderer = class MarkdownRenderer {
             const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
             
             // Apply bullet character styling
-            this._applyTag('bullet-char', bulletStart, bulletEnd);
+            this._applyTag(bullet === '-' ? 'bullet-dash' : 'bullet-star', bulletStart, bulletEnd);
             
             // Apply margin styling to the entire line (only if not already applied)
             const lineStart = this.buffer.get_iter_at_offset(lineOffset);
@@ -1065,10 +1097,14 @@ var MarkdownRenderer = class MarkdownRenderer {
                 this._applyTag('bullet-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: separate indent and marker
-            const markerText = bullet + ' ';
-            const indentTagName = this._getHangingIndentTag(indent, markerText);
-            this._applyTag(indentTagName, lineStart, lineEnd);
+            // Paragraph indent is applied after the inline patterns below so the
+            // measured prefix includes a rendered todo checkbox, if any
+            listItem = {
+                indentLen: indent.length,
+                markerLen: 2,
+                contentIdx: line.length - bulletMatch[3].length,
+                levelIndent: true,
+            };
         }
         
         // Numbered list points (e.g., "1. item" or "  1. item")
@@ -1093,14 +1129,27 @@ var MarkdownRenderer = class MarkdownRenderer {
                 this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: separate indent and marker
-            const markerText = number + '. ';
-            const indentTagName = this._getHangingIndentTag(indent, markerText);
-            this._applyTag(indentTagName, lineStart, lineEnd);
+            // Paragraph indent is applied after the inline patterns below
+            listItem = {
+                indentLen: indent.length,
+                markerLen: number.length + 2,
+                contentIdx: line.length - numberedMatch[3].length,
+                levelIndent: false,
+            };
         }
         
         // Todo items: apply pattern for [ ] and [X] (but styling happens in cursor-aware version)
         this._applyTodoPattern(line, lineOffset);
+        
+        // Paragraph indent for list items, measured after checkbox tags are in place
+        if (listItem) {
+            // Wrapped lines align with the text after a leading todo checkbox
+            const todoMatch = line.slice(listItem.contentIdx).match(/^\[[ Xx]\]\s*/);
+            if (todoMatch) {
+                listItem.contentIdx += todoMatch[0].length;
+            }
+            this._applyListIndent(lineOffset, listItem);
+        }
         
         // Table rows: detect and style pipes and cells
         this._applyTablePattern(line, lineOffset);
@@ -1697,6 +1746,9 @@ var MarkdownRenderer = class MarkdownRenderer {
             return;
         }
         
+        // List item structure for paragraph indentation (null if not a list line)
+        let listItem = null;
+        
         // Bullet points - handle * and - bullets
         const bulletMatch = line.match(/^(\s*)([-*])\s+(.*)$/);
         if (bulletMatch) {
@@ -1735,10 +1787,14 @@ var MarkdownRenderer = class MarkdownRenderer {
                 this._applyTag('bullet-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: separate indent and marker
-            const markerText = bullet + ' ';
-            const indentTagName = this._getHangingIndentTag(indent, markerText);
-            this._applyTag(indentTagName, lineStart, lineEnd);
+            // Paragraph indent is applied after the inline patterns below so the
+            // measured prefix includes a rendered todo checkbox, if any
+            listItem = {
+                indentLen: indent.length,
+                markerLen: 2,
+                contentIdx: line.length - bulletMatch[3].length,
+                levelIndent: true,
+            };
         }
         
         // Numbered list points (e.g., "1. item" or "  1. item")
@@ -1764,14 +1820,27 @@ var MarkdownRenderer = class MarkdownRenderer {
                 this._applyTag('numbered-list-margin', lineStart, lineEnd);
             }
             
-            // Apply hanging indent: separate indent and marker
-            const markerText = number + '. ';
-            const indentTagName = this._getHangingIndentTag(indent, markerText);
-            this._applyTag(indentTagName, lineStart, lineEnd);
+            // Paragraph indent is applied after the inline patterns below
+            listItem = {
+                indentLen: indent.length,
+                markerLen: number.length + 2,
+                contentIdx: line.length - numberedMatch[3].length,
+                levelIndent: false,
+            };
         }
         
         // Todo items with cursor awareness
         this._applyTodoPatternWithCursor(line, lineOffset, cursorOffset);
+        
+        // Paragraph indent for list items, measured after checkbox tags are in place
+        if (listItem) {
+            // Wrapped lines align with the text after a leading todo checkbox
+            const todoMatch = line.slice(listItem.contentIdx).match(/^\[[ Xx]\]\s*/);
+            if (todoMatch) {
+                listItem.contentIdx += todoMatch[0].length;
+            }
+            this._applyListIndent(lineOffset, listItem);
+        }
         
         // Table rows: detect and style pipes and cells with cursor awareness
         this._applyTablePatternWithCursor(line, lineOffset, cursorOffset);
