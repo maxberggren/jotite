@@ -234,15 +234,13 @@ var ThemeManager = class ThemeManager {
                 padding: 0;
             }
 
+            .status-settings-button {
+                padding: 0px 2px;
+            }
+
             .status-button:hover {
                 opacity: 0.6;
                 background: transparent;
-            }
-
-            .status-button-large {
-                font-size: 20px;
-                line-height: 0.8;
-                padding: 0px;
             }
 
             .jot-hash {
@@ -480,4 +478,3 @@ var ThemeManager = class ThemeManager {
         `;
     }
 }
-
