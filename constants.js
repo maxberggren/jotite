@@ -6,7 +6,8 @@ var Constants = {
     // Application
     APP_ID: 'com.github.jotite',
     JOT_DIR: ['Documents', 'Jotite'],
-    THEME_PATH: ['.config', 'omarchy', 'current', 'theme', 'alacritty.toml'],
+    THEME_PATH: ['.local', 'state', 'omarchy', 'current', 'theme', 'alacritty.toml'],
+    LEGACY_THEME_PATH: ['.config', 'omarchy', 'current', 'theme', 'alacritty.toml'],
     FEEDBACK_TIMEOUT_MS: 3000,
     
     // Keyboard keys
@@ -36,4 +37,3 @@ var Constants = {
     FILE_PATTERNS: ['*.md', '*.txt'],
     FILE_FILTER_NAME: 'Text files (*.md, *.txt)'
 };
-

@@ -13,7 +13,11 @@ var ThemeManager = class ThemeManager {
 
     _getThemePath() {
         const homeDir = GLib.get_home_dir();
-        return GLib.build_filenamev([homeDir, ...Constants.THEME_PATH]);
+        const themePath = GLib.build_filenamev([homeDir, ...Constants.THEME_PATH]);
+        if (Gio.File.new_for_path(themePath).query_exists(null)) {
+            return themePath;
+        }
+        return GLib.build_filenamev([homeDir, ...Constants.LEGACY_THEME_PATH]);
     }
 
     _loadColors() {
@@ -111,6 +115,19 @@ var ThemeManager = class ThemeManager {
                 this.colors = this._loadColors();
                 callback();
             });
+
+            // Omarchy replaces the theme directory when switching themes.
+            // Watch its stable parent so subsequent switches keep reloading.
+            const currentDir = file.get_parent().get_parent();
+            if (currentDir.query_exists(null)) {
+                this.currentMonitor = currentDir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
+                this.currentMonitor.connect('changed', (_monitor, changedFile) => {
+                    if (changedFile.get_basename() === 'theme') {
+                        this.colors = this._loadColors();
+                        callback();
+                    }
+                });
+            }
             
             // Also monitor GTK CSS file if it exists
             const homeDir = GLib.get_home_dir();
