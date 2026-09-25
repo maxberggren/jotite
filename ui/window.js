@@ -3,6 +3,7 @@ const { Constants } = imports.constants;
 const { SettingsManager } = imports.settings.settingsManager;
 const { ThemeManager } = imports.theme.themeManager;
 const { MarkdownRenderer } = imports.markdown.markdownRenderer;
+const { MarkdownTextView } = imports.ui.markdownTextView;
 const { FileManager } = imports.file.fileManager;
 const { SearchBarComponent } = imports.ui.searchBar;
 const { BulletHandlers } = imports.ui.bulletHandlers;
@@ -77,7 +78,7 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _createTextView() {
-        this._textView = new Gtk.TextView({
+        this._textView = new MarkdownTextView({
             wrap_mode: Gtk.WrapMode.WORD_CHAR,
             vexpand: true,
             hexpand: true,

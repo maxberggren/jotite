@@ -404,10 +404,12 @@ var MarkdownRenderer = class MarkdownRenderer {
         });
         tagTable.add(bulletDashTag);
         
-        // Bullet character styling for asterisk "*" when cursor is far (faint like dash)
+        // Keep the asterisk's advance width while the text view draws a solid dot.
+        this.textView.bulletColor = this._colorWithOpacity(this.colors.foreground, 0.35);
         const bulletStarTag = new Gtk.TextTag({
             name: 'bullet-star',
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.5),
+            // Pango treats zero alpha as unset; use the smallest nonzero alpha.
+            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 1 / 65535),
         });
         tagTable.add(bulletStarTag);
         
@@ -1799,7 +1801,7 @@ var MarkdownRenderer = class MarkdownRenderer {
             const bulletEnd = this.buffer.get_iter_at_offset(bulletPos + 1);
             
             // Check if cursor is right next to the bullet (at or adjacent to bullet position)
-            const cursorNearBullet = cursorOffset >= bulletPos && cursorOffset <= bulletPos + 2;
+            const cursorNearBullet = cursorOffset >= bulletPos && cursorOffset <= bulletPos + 1;
             
             // Apply styling ONLY - never modify buffer content
             if (bullet === '-') {
@@ -1811,7 +1813,7 @@ var MarkdownRenderer = class MarkdownRenderer {
                     // Show visible asterisk when cursor is right next to the bullet
                     this._applyTag('bullet-star-near', bulletStart, bulletEnd);
                 } else {
-                    // Show faint asterisk when cursor is away
+                    // Render a solid dot when cursor is away
                     this._applyTag('bullet-star', bulletStart, bulletEnd);
                 }
             }
