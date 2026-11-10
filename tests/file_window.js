@@ -374,6 +374,29 @@ async function run(app) {
         host.forceClose();
     }
 
+    // ---- Plain `jotite` (activate) raises an existing window -------------
+    {
+        app._draftsChecked = true;
+        for (const x of app._jotWindows()) x.forceClose();
+        await sleep(100);
+        const activate = () => JotApplication.prototype.vfunc_activate.call(app);
+        activate();
+        await sleep(100);
+        check('activate: opens a window when none exist', app._jotWindows().length === 1);
+        const first = app._jotWindows()[0];
+        first._textView.get_buffer().set_text('untitled, not today', -1);
+        const second = new JotWindow(app);
+        second.present();
+        await sleep(100);
+        activate();
+        await sleep(100);
+        check('activate: no new window while one exists', app._jotWindows().length === 2,
+            String(app._jotWindows().length));
+        check('activate: raises the most recently focused window', app._jotWindows()[0] === second);
+        first.forceClose();
+        second.forceClose();
+    }
+
     // ---- Teardown: everything closes cleanly -------------------------------
     for (const x of app._jotWindows()) x.forceClose();
     await sleep(100);

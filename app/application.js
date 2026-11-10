@@ -5,9 +5,10 @@ const { Constants } = imports.constants;
 // Application
 // ============================================================================
 //
-// Single instance: launching `jotite [FILE...]` while Jotite runs opens the
-// files (or a note window) in the running instance. Every file gets its own
-// window; a file that is already open just raises its window.
+// Single instance: launching `jotite FILE...` while Jotite runs opens the
+// files in the running instance; plain `jotite` raises the most recently
+// focused window (or opens today's note when no window is open). Every file
+// gets its own window; a file that is already open just raises its window.
 
 function _appDirectory() {
     return GLib.path_get_dirname(imports.system.programPath);
@@ -94,17 +95,15 @@ class JotApplication extends Adw.Application {
     vfunc_activate() {
         if (this._restoreDrafts() > 0)
             return;
-        const JotWindow = this._JotWindow();
-        const { FileManager } = imports.file.fileManager;
-        // Raise the window that already shows today's note, if any
-        const existing = this._jotWindows().find(w => {
-            const path = w.getFilePath();
-            return path && path === FileManager.todayNotePath(w._settingsManager);
-        });
+        // Plain `jotite` while Jotite runs raises the most recently focused
+        // window (GtkApplication keeps them in focus order); a new note
+        // window is only opened when there is none.
+        const existing = this._jotWindows()[0];
         if (existing) {
             existing.present();
             return;
         }
+        const JotWindow = this._JotWindow();
         new JotWindow(this).present();
     }
 
