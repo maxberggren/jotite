@@ -1,156 +1,144 @@
 const { Gio, GLib, Adw, GObject } = imports.gi;
 const { Constants } = imports.constants;
 
-// Import will be added after window.js is created
-// const JotWindow = imports.ui.window.JotWindow;
-
 // ============================================================================
 // Application
 // ============================================================================
+//
+// Single instance: launching `jotite [FILE...]` while Jotite runs opens the
+// files (or a note window) in the running instance. Every file gets its own
+// window; a file that is already open just raises its window.
+
+function _appDirectory() {
+    return GLib.path_get_dirname(imports.system.programPath);
+}
+
+// Make the bundled pixel font available when running from a source checkout
+// (packages install it system-wide). Registers it with the process' font map
+// only; nothing is written to disk.
+function _registerBundledFont() {
+    const appDir = _appDirectory();
+    if (appDir.startsWith('/usr/'))
+        return;
+    const path = GLib.build_filenamev([appDir, 'pxlxxl.ttf']);
+    if (!GLib.file_test(path, GLib.FileTest.EXISTS))
+        return;
+    try {
+        imports.gi.versions.PangoCairo = '1.0';
+        const { PangoCairo } = imports.gi;
+        const fontMap = PangoCairo.FontMap.get_default();
+        if (typeof fontMap.add_font_file === 'function')
+            fontMap.add_font_file(path);
+    } catch (e) {
+        logError(e, 'Jotite: could not register bundled font');
+    }
+}
 
 var JotApplication = GObject.registerClass(
 class JotApplication extends Adw.Application {
     _init() {
         super._init({
             application_id: Constants.APP_ID,
-            flags: Gio.ApplicationFlags.HANDLES_OPEN | Gio.ApplicationFlags.NON_UNIQUE,
+            flags: Gio.ApplicationFlags.HANDLES_OPEN,
         });
-        this._fileToOpen = null;
-        
-        // Ensure font is installed
-        this._ensureFontInstalled();
-        
-        // Set up quit handler to check for unsaved changes
-        this._setupQuitHandler();
+        this._draftsChecked = false;
+        this._quitting = false;
     }
-    
-    _setupQuitHandler() {
-        // Create a quit action that checks for unsaved changes first
+
+    vfunc_startup() {
+        super.vfunc_startup();
+        _registerBundledFont();
+
         const quitAction = new Gio.SimpleAction({ name: 'quit' });
-        quitAction.connect('activate', () => {
-            this._handleQuit();
-        });
+        quitAction.connect('activate', () => this.quitGracefully());
         this.add_action(quitAction);
-        
-        // Set Ctrl+Q as the keyboard accelerator for quit
         this.set_accels_for_action('app.quit', ['<Control>q']);
     }
-    
-    _handleQuit() {
-        // Get all application windows
-        const windows = this.get_windows();
-        
-        // Check if any window has unsaved changes
-        const windowWithUnsavedChanges = windows.find(window => 
-            window._hasUnsavedChanges && window._hasUnsavedChanges === true
-        );
-        
-        if (windowWithUnsavedChanges) {
-            // Show dialog on the window with unsaved changes
-            windowWithUnsavedChanges._showUnsavedChangesDialog(() => {
-                // User chose to discard - quit the app
-                this.quit();
-            }, () => {
-                // User chose to save
-                windowWithUnsavedChanges._saveNote();
-                // Quit after save completes
-                this.quit();
-            });
-        } else {
-            // No unsaved changes, quit directly
-            this.quit();
-        }
+
+    _JotWindow() {
+        return imports.ui.window.JotWindow;
     }
-    
-    _ensureFontInstalled() {
-        try {
-            // Check if font is already installed by checking fontconfig
-            const checkCmd = ['fc-list', ':', 'family', 'file'];
-            const [, checkOutput] = GLib.spawn_command_line_sync(checkCmd.join(' '));
-            const fontList = new TextDecoder().decode(checkOutput);
-            
-            if (fontList.toLowerCase().includes('pxlxxl')) {
-                return;
+
+    _jotWindows() {
+        const JotWindow = this._JotWindow();
+        return this.get_windows().filter(w => w instanceof JotWindow);
+    }
+
+    _windowForFile(file) {
+        return this._jotWindows().find(w => {
+            const path = w.getFilePath();
+            return path && file.get_path() && path === file.get_path();
+        }) || null;
+    }
+
+    // Recovery drafts left by a crashed session are restored once, at the
+    // first activation of this process. Returns the number of windows opened.
+    _restoreDrafts() {
+        if (this._draftsChecked)
+            return 0;
+        this._draftsChecked = true;
+        const { Drafts } = imports.file.drafts;
+        const JotWindow = this._JotWindow();
+        let count = 0;
+        for (const draft of new Drafts().listOrphans()) {
+            if (!draft.text.trim()) {
+                new Drafts().remove(draft.id);
+                continue;
             }
-            
-            // Try multiple methods to find the script directory
-            let scriptPath = null;
-            
-            // Method 1: Try using imports.system.programInvocationName (the actual script path)
-            if (imports.system.programInvocationName) {
-                const invocationPath = imports.system.programInvocationName;
-                if (invocationPath.startsWith('./') || invocationPath.startsWith('/')) {
-                    scriptPath = GLib.path_get_dirname(GLib.canonicalize_filename(invocationPath, GLib.get_current_dir()));
-                }
-            }
-            
-            // Method 2: Try programPath
-            if (!scriptPath) {
-                scriptPath = GLib.path_get_dirname(imports.system.programPath);
-            }
-            
-            // Method 3: Check current directory
-            if (!scriptPath || scriptPath === '/usr/bin') {
-                scriptPath = GLib.get_current_dir();
-            }
-            
-            const fontSourcePath = GLib.build_filenamev([scriptPath, 'pxlxxl.ttf']);
-            
-            // Check if font file exists in script directory
-            const fontFile = Gio.File.new_for_path(fontSourcePath);
-            if (!fontFile.query_exists(null)) {
-                print(`Warning: Font file not found at ${fontSourcePath}`);
-                print('Please ensure pxlxxl.ttf is in the same directory as jotite.js');
-                return;
-            }
-            
-            // Install to user fonts directory
-            const fontDir = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'share', 'fonts', 'jotite']);
-            const fontDirFile = Gio.File.new_for_path(fontDir);
-            
-            // Create directory if it doesn't exist
-            if (!fontDirFile.query_exists(null)) {
-                fontDirFile.make_directory_with_parents(null);
-            }
-            
-            // Copy font file
-            const fontDestPath = GLib.build_filenamev([fontDir, 'pxlxxl.ttf']);
-            const fontDestFile = Gio.File.new_for_path(fontDestPath);
-            fontFile.copy(fontDestFile, Gio.FileCopyFlags.OVERWRITE, null, null);
-            
-            // Update font cache
-            const updateCmd = ['fc-cache', '-f', fontDir];
-            const [cacheSuccess, cacheOutput, cacheError] = GLib.spawn_command_line_sync(updateCmd.join(' '));
-            
-            if (!cacheSuccess) {
-                print(`Warning: fc-cache failed: ${new TextDecoder().decode(cacheError)}`);
-            }
-        } catch (e) {
-            print(`ERROR: Could not auto-install font: ${e.message}`);
-            print(`Stack trace: ${e.stack || 'N/A'}`);
+            new JotWindow(this, { draft }).present();
+            count++;
         }
+        return count;
     }
 
     vfunc_activate() {
-        // Import dynamically to avoid circular dependency
-        const JotWindow = imports.ui.window.JotWindow;
-        
-        // Always create a new window to allow multiple instances
-        const window = new JotWindow(this);
-
-        if (this._fileToOpen) {
-            window.loadFile(this._fileToOpen);
-            this._fileToOpen = null;
+        if (this._restoreDrafts() > 0)
+            return;
+        const JotWindow = this._JotWindow();
+        const { FileManager } = imports.file.fileManager;
+        // Raise the window that already shows today's note, if any
+        const existing = this._jotWindows().find(w => {
+            const path = w.getFilePath();
+            return path && path === FileManager.todayNotePath(w._settingsManager);
+        });
+        if (existing) {
+            existing.present();
+            return;
         }
-
-        window.present();
+        new JotWindow(this).present();
     }
 
-    vfunc_open(files, hint) {
-        if (files.length > 0) {
-            this._fileToOpen = files[0];
+    vfunc_open(files, _hint) {
+        this._restoreDrafts();
+        const JotWindow = this._JotWindow();
+        for (const file of files) {
+            const existing = this._windowForFile(file);
+            if (existing)
+                existing.present();
+            else
+                new JotWindow(this, { file }).present();
         }
-        this.activate();
+    }
+
+    // Ctrl+Q: ask about unsaved changes in every window, one after another;
+    // quit only if none of them was cancelled.
+    async quitGracefully() {
+        if (this._quitting)
+            return;
+        this._quitting = true;
+        try {
+            const windows = this._jotWindows();
+            for (const w of windows) {
+                if (!(await w.confirmClose()))
+                    return;
+            }
+            for (const w of windows)
+                w.forceClose();
+            this.quit();
+        } catch (e) {
+            logError(e, 'Jotite: quit failed');
+        } finally {
+            this._quitting = false;
+        }
     }
 });
-
