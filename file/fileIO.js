@@ -4,10 +4,11 @@ const { Gio, GLib } = imports.gi;
 // Byte-preserving text file I/O
 // ============================================================================
 //
-// The editor buffer always works with '\n' line endings and no BOM. A file's
-// on-disk "format" (BOM, dominant line ending) is detected on load and
-// re-applied on save, so opening and saving an unedited file reproduces it
-// byte for byte. Files that are not valid UTF-8 (or contain NUL bytes) are
+// The editor buffer works without a BOM and, for files that use CRLF
+// throughout, with '\n' line endings. A file's on-disk "format" (BOM, CRLF)
+// is detected on load and re-applied on save; files with mixed line endings
+// keep them verbatim in the buffer. Opening and saving reproduces a file byte
+// for byte, and an edit only changes the edited lines. Files that are not valid UTF-8 (or contain NUL bytes) are
 // refused instead of being silently "repaired" with U+FFFD.
 
 const BOM = [0xEF, 0xBB, 0xBF];
@@ -41,14 +42,18 @@ function decode(bytes) {
         throw new EncodingError(`File is not valid UTF-8 and cannot be edited safely (${e.message})`);
     }
 
-    // Line endings: count CRLF vs. bare LF. If CRLF dominates, the buffer gets
-    // '\n' and CRLF is re-emitted on save.
-    let crlf = 0, lf = 0;
+    // Line endings: a file whose every line ending is CRLF is edited with
+    // '\n' and CRLF is re-emitted on save. Anything else (LF, mixed, lone
+    // CR) stays exactly as it is in the buffer (GtkTextBuffer understands
+    // all of them as line breaks), so saving never rewrites the endings of
+    // lines that were not edited.
+    let crlf = 0, other = 0;
     for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) {
         if (i > 0 && text.charCodeAt(i - 1) === 13) crlf++;
-        else lf++;
+        else other++;
     }
-    const eol = crlf > lf ? '\r\n' : '\n';
+    const cr = text.split('\r').length - 1;
+    const eol = crlf > 0 && other === 0 && cr === crlf ? '\r\n' : '\n';
     if (eol === '\r\n')
         text = text.replace(/\r\n/g, '\n');
 

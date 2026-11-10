@@ -29,7 +29,7 @@ sudo pacman -S gjs gtk4 libadwaita fontconfig
 - Gradient-colored headings with configurable "moods"
 - Smart lists: Enter continues bullets, numbers and tasks; Tab nests; numbering stays correct
 - Autosave for saved notes, recovery drafts for untitled ones, and a warning if the file changes on disk
-- Files round-trip byte-for-byte (line endings, BOM and trailing newline are preserved)
+- Files round-trip byte-for-byte (CRLF, LF or mixed line endings, BOM and trailing newline are preserved; editing a line leaves the others untouched)
 - Follows your Omarchy theme live
 
 ### ⌨️ Keyboard Shortcuts

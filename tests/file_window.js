@@ -118,6 +118,28 @@ async function run(app) {
     check('autosave: CRLF+BOM preserved', bytesEqual(read(crlfPath),
         new Uint8Array([0xEF, 0xBB, 0xBF, ...enc('# Title\r\n- a -> b\r\nÅäö 😀\r\nlast edit')])), readText(crlfPath));
 
+    // ---- Mixed line endings: kept verbatim, edits touch only their line ---
+    {
+        const mixedPath = `${root}/mixed.md`;
+        GLib.file_set_contents(mixedPath, enc('a\r\n- [ ] b\r\nc\nd\r\n'));
+        const mw = new JotWindow(app, { file: Gio.File.new_for_path(mixedPath) });
+        mw.present();
+        await sleep(100);
+        check('mixed: open+save byte-identical', (await mw.save()) && readText(mixedPath) === 'a\r\n- [ ] b\r\nc\nd\r\n');
+        const mb = mw._textView.get_buffer();
+        mb.place_cursor(mb.get_iter_at_line(2)[1]);
+        typeText(mw, 'X');
+        mb.place_cursor(mb.get_iter_at_line(1)[1]);
+        mw._bulletHandlers.handleKeyPress(Constants.KEY_T, Constants.CTRL_MASK);
+        await mw.save();
+        check('mixed: edits keep other line endings', readText(mixedPath) === 'a\r\n- [X] b\r\nXc\nd\r\n', JSON.stringify(readText(mixedPath)));
+        mb.place_cursor(mb.get_iter_at_line(0)[1]);
+        mw._lineMovement.moveLineDown();
+        await mw.save();
+        check('mixed: line move keeps endings', readText(mixedPath) === '- [X] b\r\na\r\nXc\nd\r\n', JSON.stringify(readText(mixedPath)));
+        mw.forceClose();
+    }
+
     // ---- External change while clean -> silent reload (monitor) ---------
     await sleep(100);
     GLib.file_set_contents(crlfPath, enc('# Changed elsewhere\r\nline two\r\n'));

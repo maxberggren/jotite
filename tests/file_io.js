@@ -65,8 +65,21 @@ try {
     check('lf default', FileIO.decode(cases['lf.md']).format.eol === '\n');
     // Edits in a CRLF file are written with CRLF
     check('crlf re-emitted', new TextDecoder().decode(FileIO.encode('x\ny\n', crlf.format)) === 'x\r\ny\r\n');
-    // Mixed endings: dominant one wins
-    check('mixed endings, LF dominant', FileIO.decode(enc('a\r\nb\nc\n')).format.eol === '\n');
+    // Mixed endings (or lone CR) are kept verbatim: no conversion either way
+    for (const mixed of ['a\r\nb\nc\n', 'a\r\nb\r\nc\nd\r\n', 'a\rb\rc', 'a\r\nb\rc\r\n']) {
+        const d = FileIO.decode(enc(mixed));
+        check(`mixed ${JSON.stringify(mixed)}: kept verbatim`, d.format.eol === '\n' && d.text === mixed);
+        check(`mixed ${JSON.stringify(mixed)}: round trip`,
+            new TextDecoder().decode(FileIO.encode(d.text, d.format)) === mixed);
+        const file = writeRaw('mixed.md', enc(mixed));
+        const r = FileIO.readFile(file);
+        FileIO.writeFile(file, r.text, r.format, r.etag);
+        check(`mixed ${JSON.stringify(mixed)}: byte-identical after open+save`, bytesEqual(readRaw('mixed.md'), enc(mixed)));
+    }
+    // An edit in a mixed file only changes the edited line
+    const mixedDoc = FileIO.decode(enc('a\r\nb\r\nc\nd\r\n'));
+    check('mixed: edit keeps other endings', new TextDecoder().decode(
+        FileIO.encode(mixedDoc.text.replace('c\n', 'cX\n'), mixedDoc.format)) === 'a\r\nb\r\ncX\nd\r\n');
 
     // --- Invalid UTF-8 / binary is refused, never replaced -----------------
     for (const [name, bytes] of [
