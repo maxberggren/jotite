@@ -51,10 +51,9 @@ const HR_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const HEADING_RE = /^( {0,3})(#{1,6})(?:[ \t]+|$)/;
 const HTML_OPEN_RE = /^ {0,3}<!--/;
 const BLANK_RE = /^[ \t]*$/;
-const AUTOLINK_RE = /^<([A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*)>/;
-const EMAIL_AUTOLINK_RE = /^<([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~\-]+@[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*)>/;
+const AUTOLINK_RE = /<([A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*)>/y;
+const EMAIL_AUTOLINK_RE = /<([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~\-]+@[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*)>/y;
 const BARE_URL_RE = /(?:https?|ftp):\/\/[^\s<>]+/g;
-const ASCII_PUNCT_RE = /[!-\/:-@\[-`{-~]/;
 const PUNCT_RE = /[\p{P}\p{S}]/u;
 const WS_RE = /\s/u;
 // Paragraph separators GtkTextBuffer breaks lines on: \r\n, \n, \r, U+2029
@@ -118,12 +117,28 @@ function headingContent(text, contentStart) {
     return { contentEnd: closeStart, closeStart: closeStart < text.length ? closeStart : -1 };
 }
 
+// ASCII character classes (0 = other, 1 = whitespace, 2 = punctuation)
+const ASCII_CLASS = new Uint8Array(128);
+for (let c = 0; c < 128; c++) {
+    const ch = String.fromCharCode(c);
+    ASCII_CLASS[c] = WS_RE.test(ch) ? 1 : (PUNCT_RE.test(ch) ? 2 : 0);
+}
+
 function isWhitespace(ch) {
-    return ch === undefined || ch === '' || WS_RE.test(ch);
+    if (ch === undefined || ch === '') return true;
+    const c = ch.charCodeAt(0);
+    return c < 128 ? ASCII_CLASS[c] === 1 : WS_RE.test(ch);
 }
 
 function isPunctuation(ch) {
-    return ch !== undefined && ch !== '' && PUNCT_RE.test(ch);
+    if (ch === undefined || ch === '') return false;
+    const c = ch.charCodeAt(0);
+    return c < 128 ? ASCII_CLASS[c] === 2 : PUNCT_RE.test(ch);
+}
+
+// ASCII punctuation (backslash-escapable characters)
+function isAsciiPunctCode(c) {
+    return c < 128 && ASCII_CLASS[c] === 2;
 }
 
 // Code point before UTF-16 index i (whole surrogate pair when needed)
@@ -169,8 +184,19 @@ function span(model, s, e, t) {
     if (e > s) model.spans.push({ s, e, t });
 }
 
+// CommonMark lets implementations limit parenthesis nesting in link
+// destinations; the limit keeps scanning linear on lines like "[a]([a]([a](".
+const MAX_DEST_PARENS = 16;
+// Emphasis delimiter runs per scope beyond which a line is left plain
+const MAX_DELIM_RUNS = 400;
+
 // Parse a link destination and optional title starting just after "](".
-function parseLinkTail(t, p, end) {
+// memo.titleFail[c]: a title scan for closing character c starting at or
+// after this position is known to fail (it reached the end of the line).
+function parseLinkTail(t, p, end, memo) {
+    // Every inline link ends with ')'
+    if (memo.lastParen === undefined) memo.lastParen = t.lastIndexOf(')', end - 1);
+    if (p > memo.lastParen) return null;
     while (p < end && (t[p] === ' ' || t[p] === '\t')) p++;
     let destS, destE;
     if (t[p] === '<') {
@@ -187,15 +213,15 @@ function parseLinkTail(t, p, end) {
         let depth = 0;
         let q = p;
         while (q < end) {
-            const ch = t[q];
-            if (ch === '\\' && q + 1 < end && ASCII_PUNCT_RE.test(t[q + 1])) {
+            const c = t.charCodeAt(q);
+            if (c === 92 && q + 1 < end && isAsciiPunctCode(t.charCodeAt(q + 1))) { // backslash
                 q += 2;
                 continue;
             }
-            if (ch === ' ' || ch === '\t' || ch < ' ') break;
-            if (ch === '(') {
-                depth++;
-            } else if (ch === ')') {
+            if (c <= 32) break; // space, tab, control
+            if (c === 40) { // (
+                if (++depth > MAX_DEST_PARENS) return null;
+            } else if (c === 41) { // )
                 if (depth === 0) break;
                 depth--;
             }
@@ -211,11 +237,17 @@ function parseLinkTail(t, p, end) {
     if ((p > wsStart || destE === destS) && (t[p] === '"' || t[p] === "'" || t[p] === '(')) {
         const close = t[p] === '(' ? ')' : t[p];
         let q = p + 1;
+        if (q >= memo.titleFail[close]) return null;
         while (q < end && t[q] !== close) {
             if (t[q] === '\\' && q + 1 < end) q++;
             q++;
         }
-        if (q >= end) return null;
+        if (q >= end) {
+            // Every later scan for this character fails too (from p + 1 on
+            // both scans visit the same positions)
+            memo.titleFail[close] = Math.min(memo.titleFail[close], p + 1);
+            return null;
+        }
         p = q + 1;
         while (p < end && (t[p] === ' ' || t[p] === '\t')) p++;
     }
@@ -231,15 +263,19 @@ function parseInline(t, start, end, model) {
     // in emphasis, links or arrows.
     const excl = new Uint8Array(end + 1);
     const fill = (s, e) => excl.fill(1, s, e);
+    // Memoised searches keep long pathological lines linear
+    const memo = { titleFail: { '"': Infinity, "'": Infinity, ')': Infinity } };
+    let commentFrom = -1, commentAt = -1; // last '-->' search: start, result
+    let runsByLen = null;                 // backtick run length -> {pos[], k}
 
     // Pass 1: backslash escapes, code spans, autolinks, inline comments
     let i = start;
     while (i < end) {
         const c = t.charCodeAt(i);
         if (c === 92) { // backslash
-            if (i + 1 < end && ASCII_PUNCT_RE.test(t[i + 1])) {
+            if (i + 1 < end && isAsciiPunctCode(t.charCodeAt(i + 1))) {
                 mark(model, i, i + 1, 'invisible', 'dim', i, i + 2);
-                fill(i, i + 2);
+                excl[i] = excl[i + 1] = 1;
                 i += 2;
                 continue;
             }
@@ -249,20 +285,13 @@ function parseInline(t, start, end, model) {
         if (c === 96) { // backtick
             let n = 1;
             while (i + n < end && t.charCodeAt(i + n) === 96) n++;
-            let j = i + n;
+            // Closer: the first backtick run of exactly n after the opener
+            if (!runsByLen) runsByLen = backtickRuns(t, i, end);
+            const runs = runsByLen.get(n);
             let close = -1;
-            while (j < end) {
-                if (t.charCodeAt(j) === 96) {
-                    let m = 1;
-                    while (j + m < end && t.charCodeAt(j + m) === 96) m++;
-                    if (m === n) {
-                        close = j;
-                        break;
-                    }
-                    j += m;
-                } else {
-                    j++;
-                }
+            if (runs) {
+                while (runs.k < runs.pos.length && runs.pos[runs.k] < i + n) runs.k++;
+                if (runs.k < runs.pos.length) close = runs.pos[runs.k];
             }
             if (close >= 0) {
                 const e = close + n;
@@ -281,7 +310,13 @@ function parseInline(t, start, end, model) {
         }
         if (c === 60) { // <
             if (t.startsWith('<!--', i)) {
-                const k = t.indexOf('-->', i + 2);
+                // Searches start at increasing positions: reuse the last
+                // result while it is still ahead (or there was none)
+                if (!(commentFrom >= 0 && commentFrom <= i + 2 && (commentAt < 0 || commentAt >= i + 2))) {
+                    commentFrom = i + 2;
+                    commentAt = t.indexOf('-->', i + 2);
+                }
+                const k = commentAt;
                 if (k >= 0 && k + 3 <= end) {
                     span(model, i, k + 3, 'comment');
                     fill(i, k + 3);
@@ -289,15 +324,23 @@ function parseInline(t, start, end, model) {
                     continue;
                 }
             }
-            const rest = t.slice(i, end);
-            let m = AUTOLINK_RE.exec(rest);
+            // Both autolink forms start with a letter, digit or email
+            // character; skip the regexes for anything else (e.g. "<<<")
+            const n = i + 1 < end ? t.charCodeAt(i + 1) : 0;
+            let m = null;
             let url = null;
-            if (m) {
-                url = m[1];
-            } else {
-                m = EMAIL_AUTOLINK_RE.exec(rest);
-                if (m) url = 'mailto:' + m[1];
+            if (n > 32 && n < 127 && n !== 60 && n !== 62 && n !== 64) {
+                AUTOLINK_RE.lastIndex = i;
+                m = AUTOLINK_RE.exec(t);
+                if (m) {
+                    url = m[1];
+                } else {
+                    EMAIL_AUTOLINK_RE.lastIndex = i;
+                    m = EMAIL_AUTOLINK_RE.exec(t);
+                    if (m) url = 'mailto:' + m[1];
+                }
             }
+            if (m && i + m[0].length > end) m = null;
             if (m) {
                 const e = i + m[0].length;
                 span(model, i + 1, e - 1, 'link');
@@ -316,12 +359,15 @@ function parseInline(t, start, end, model) {
     // brackets win) and must be directly followed by "(".
     const linkTexts = [];
     for (i = start; i < end; i++) {
-        if (t[i] !== '[' || excl[i]) continue;
+        if (t.charCodeAt(i) !== 91 || excl[i]) continue; // [
         let j = i + 1;
-        while (j < end && !((t[j] === ']' || t[j] === '[') && !excl[j])) j++;
+        for (; j < end; j++) {
+            const c = t.charCodeAt(j);
+            if ((c === 93 || c === 91) && !excl[j]) break; // ] [
+        }
         if (j >= end || t[j] !== ']' || j === i + 1) continue;
         if (t[j + 1] !== '(' || excl[j + 1]) continue;
-        const tail = parseLinkTail(t, j + 2, end);
+        const tail = parseLinkTail(t, j + 2, end, memo);
         if (!tail) continue;
         const image = i > start && t[i - 1] === '!' && !excl[i - 1];
         const s = image ? i - 1 : i;
@@ -337,7 +383,12 @@ function parseInline(t, start, end, model) {
         linkTexts.push([i + 1, j]);
         i = e - 1;
     }
-    const inLinkText = (k) => linkTexts.some(([a, b]) => k >= a && k < b);
+    // Link texts are sorted and disjoint; queries come in increasing order
+    let ltK = 0;
+    const inLinkText = (k) => {
+        while (ltK < linkTexts.length && linkTexts[ltK][1] <= k) ltK++;
+        return ltK < linkTexts.length && k >= linkTexts[ltK][0];
+    };
 
     // Pass 3: bare URLs (GFM-style trailing punctuation trimming)
     BARE_URL_RE.lastIndex = start;
@@ -378,46 +429,53 @@ function parseInline(t, start, end, model) {
 
     // Pass 4: emphasis / strong / strikethrough via delimiter runs,
     // processed separately inside each link text and outside of links.
-    const scopes = new Map();
+    // First collect the runs cheaply; scopes with more than
+    // MAX_DELIM_RUNS runs (pathological lines) are left plain.
+    const runs = [];
+    const scopeCount = new Map();
+    let scK = 0;
     for (i = start; i < end;) {
-        const ch = t[i];
-        if ((ch === '*' || ch === '_' || ch === '~') && !excl[i]) {
-            let k = i;
-            while (k < end && t[k] === ch && !excl[k]) k++;
-            const len = k - i;
-            if (ch !== '~' || len === 2) {
-                const before = charBefore(t, i, start);
-                const after = charAt(t, k, end);
-                const bW = isWhitespace(before), aW = isWhitespace(after);
-                const bP = isPunctuation(before), aP = isPunctuation(after);
-                const left = !aW && (!aP || bW || bP);
-                const right = !bW && (!bP || aW || aP);
-                let canOpen, canClose;
-                if (ch === '_') {
-                    canOpen = left && (!right || bP);
-                    canClose = right && (!left || aP);
-                } else {
-                    canOpen = left;
-                    canClose = right;
-                }
-                if (canOpen || canClose) {
-                    let scope = -1;
-                    for (let n = 0; n < linkTexts.length; n++) {
-                        if (i >= linkTexts[n][0] && i < linkTexts[n][1]) scope = n;
-                    }
-                    if (!scopes.has(scope)) scopes.set(scope, []);
-                    scopes.get(scope).push({ ch, pos: i, len, origLen: len, canOpen, canClose });
-                }
+        const c = t.charCodeAt(i);
+        if ((c === 42 || c === 95 || c === 126) && !excl[i]) { // * _ ~
+            let k = i + 1;
+            while (k < end && t.charCodeAt(k) === c && !excl[k]) k++;
+            if (c !== 126 || k - i === 2) {
+                while (scK < linkTexts.length && linkTexts[scK][1] <= i) scK++;
+                const scope = scK < linkTexts.length && i >= linkTexts[scK][0] ? scK : -1;
+                runs.push(i, k, scope);
+                scopeCount.set(scope, (scopeCount.get(scope) || 0) + 1);
             }
             i = k;
         } else {
             i++;
         }
     }
-    for (const delims of scopes.values()) {
-        if (delims.length > 400) continue; // pathological line, leave plain
-        processEmphasis(delims, model);
+    const scopes = new Map();
+    for (let r = 0; r < runs.length; r += 3) {
+        const pos = runs[r], k = runs[r + 1], scope = runs[r + 2];
+        if (scopeCount.get(scope) > MAX_DELIM_RUNS) continue;
+        const ch = t[pos];
+        const len = k - pos;
+        const before = charBefore(t, pos, start);
+        const after = charAt(t, k, end);
+        const bW = isWhitespace(before), aW = isWhitespace(after);
+        const bP = isPunctuation(before), aP = isPunctuation(after);
+        const left = !aW && (!aP || bW || bP);
+        const right = !bW && (!bP || aW || aP);
+        let canOpen, canClose;
+        if (ch === '_') {
+            canOpen = left && (!right || bP);
+            canClose = right && (!left || aP);
+        } else {
+            canOpen = left;
+            canClose = right;
+        }
+        if (canOpen || canClose) {
+            if (!scopes.has(scope)) scopes.set(scope, []);
+            scopes.get(scope).push({ ch, pos, len, origLen: len, canOpen, canClose });
+        }
     }
+    for (const delims of scopes.values()) processEmphasis(delims, model);
 
     // Pass 5: arrows (visual only; drawn by the text view)
     for (i = start; i < end - 1; i++) {
@@ -431,6 +489,24 @@ function parseInline(t, start, end, model) {
             i += len - 1;
         }
     }
+}
+
+// Maximal backtick runs in t[from, end), grouped by length
+function backtickRuns(t, from, end) {
+    const byLen = new Map();
+    let i = t.indexOf('`', from);
+    while (i >= 0 && i < end) {
+        let n = 1;
+        while (i + n < end && t.charCodeAt(i + n) === 96) n++;
+        let entry = byLen.get(n);
+        if (!entry) {
+            entry = { pos: [], k: 0 };
+            byLen.set(n, entry);
+        }
+        entry.pos.push(i);
+        i = t.indexOf('`', i + n);
+    }
+    return byLen;
 }
 
 function processEmphasis(delims, model) {
