@@ -510,11 +510,17 @@ var MarkdownRenderer = class MarkdownRenderer {
                 for (let k = 0; k < delta; k++) extra[k] = fill();
                 return arr.slice(0, L + 1).concat(extra, arr.slice(L + 1));
             };
-            // Inserted text can inherit the split line's tags
+            // Inserted text can inherit the split line's tags. New lines
+            // also inherit its old block state: the last of them now ends
+            // where line L used to, so the classify cascade compares it
+            // with the state the following (pre-existing) line was
+            // classified against and keeps going while they differ.
             const inherited = [...(this._lineTags[L] || [])];
+            const oldKind = this._kinds[L] !== undefined ? this._kinds[L] : -1;
+            const oldOut = this._fenceOut[L] !== undefined ? this._fenceOut[L] : '';
             this._texts = add(this._texts, () => null);
-            this._kinds = add(this._kinds, () => -1);
-            this._fenceOut = add(this._fenceOut, () => '');
+            this._kinds = add(this._kinds, () => oldKind);
+            this._fenceOut = add(this._fenceOut, () => oldOut);
             this._dirty = add(this._dirty, () => DIRTY_TEXT);
             this._lineTags = add(this._lineTags, () => inherited.slice());
         } else if (delta < 0) {
@@ -523,6 +529,13 @@ var MarkdownRenderer = class MarkdownRenderer {
             for (let k = L + 1; k <= L - delta && k < this._lineTags.length; k++)
                 for (const tag of this._lineTags[k] || []) merged.add(tag);
             this._lineTags[L] = [...merged];
+            // The joined line now ends where the last merged line ended, so
+            // it takes over that line's old block state (see above)
+            const last = Math.min(L - delta, this._fenceOut.length - 1);
+            if (last > L) {
+                this._fenceOut[L] = this._fenceOut[last];
+                this._kinds[L] = this._kinds[last];
+            }
             for (const arr of [this._texts, this._kinds, this._fenceOut, this._dirty, this._lineTags])
                 arr.splice(L + 1, -delta);
         }
