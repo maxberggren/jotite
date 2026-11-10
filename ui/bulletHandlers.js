@@ -142,14 +142,19 @@ var BulletHandlers = class BulletHandlers {
 
     // Contiguous region of lines that can belong to the list block around
     // [fromLine, toLine]: list items, blank lines and indented lines.
+    // Only lines at the same block quote depth as fromLine belong to it.
     _listBlockRange(fromLine, toLine) {
+        const depth = this._lineInfo(fromLine).depth;
         const isPart = (l) => {
-            const t = this._lineText(l);
+            const info = this._lineInfo(l);
+            if (info.depth !== depth)
+                return false;
+            const t = info.inner;
             if (t.trim() === '')
                 return true;
             if (this._isCodeLine(l))
                 return /^[ \t]/.test(t);
-            return /^[ \t]/.test(t) || parseListItem(t) !== null;
+            return /^[ \t]/.test(t) || info.item !== null;
         };
         let a = fromLine;
         while (a > 0 && isPart(a - 1))
@@ -161,15 +166,44 @@ var BulletHandlers = class BulletHandlers {
         return [a, b];
     }
 
+    // The list item on line l, read after any block quote markers ("> - a").
+    // item indices (markerStart, contentStart, ...) are whole-line UTF-16
+    // indices; indent, indentWidth and contentColumn are relative to the
+    // text after the quote markers (inner). quoteEnd is 0 without a quote.
+    _lineInfo(l) {
+        const text = this._lineText(l);
+        const pre = parseLinePrefix(text);
+        const quoteEnd = pre && pre.quote ? pre.quote.end : 0;
+        return {
+            text,
+            inner: text.slice(quoteEnd),
+            quoteEnd,
+            depth: pre && pre.quote ? pre.quote.depth : 0,
+            item: pre && !this._isCodeLine(l) ? pre.item : null,
+        };
+    }
+
+    // Distinct list blocks ([a, b] ranges) containing the given lines.
+    _blocksFor(lines) {
+        const blocks = [];
+        for (const l of [...lines].sort((x, y) => x - y)) {
+            if (blocks.some(([a, b]) => l >= a && l <= b))
+                continue;
+            blocks.push(this._listBlockRange(l, l));
+        }
+        return blocks;
+    }
+
     // Build the lists in [a, b]. Each list: { items: [{line, item}], parent }.
     _scanLists(a, b) {
         const lists = [];
         const stack = [];
         for (let l = a; l <= b; l++) {
-            const text = this._lineText(l);
+            const info = this._lineInfo(l);
+            const text = info.inner;
             if (text.trim() === '')
                 continue;
-            const item = this._isCodeLine(l) ? null : parseListItem(text);
+            const item = info.item;
             if (item) {
                 const w = item.indentWidth;
                 while (stack.length && w < stack[stack.length - 1].indentWidth)
@@ -215,8 +249,9 @@ var BulletHandlers = class BulletHandlers {
     // any line of `lines`. `moved` lines starting a list restart it at 1;
     // `fresh` lines are ignored when detecting lazy "1. 1. 1." numbering.
     _renumber(from, to, lines, moved = new Set(), fresh = new Set()) {
-        const [a, b] = this._listBlockRange(from, to);
-        const lists = this._scanLists(a, b);
+        const lists = [];
+        for (const [a, b] of this._blocksFor([from, ...lines]))
+            lists.push(...this._scanLists(a, b));
         for (const list of lists) {
             if (!list.items[0].item.ordered)
                 continue;
@@ -233,8 +268,7 @@ var BulletHandlers = class BulletHandlers {
                 const expected = lazy ? others[0].item.number : start + idx;
                 if (it.item.number === expected)
                     return;
-                const text = this._lineText(it.line);
-                const item = parseListItem(text);
+                const { text, item } = this._lineInfo(it.line);
                 if (!item || !item.ordered)
                     return;
                 this._replaceInLine(it.line, text, item.markerStart,
@@ -300,7 +334,7 @@ var BulletHandlers = class BulletHandlers {
                     TextUtils.charLength(prefix));
                 this.buffer.place_cursor(newCursor);
 
-                if (item && item.ordered && !pre.quote) {
+                if (item && item.ordered) {
                     const fresh = new Set([line + 1]);
                     this._renumber(line, line + 1, fresh, new Set(), fresh);
                 }
@@ -354,17 +388,18 @@ var BulletHandlers = class BulletHandlers {
         for (let l = first; l <= last; l++) {
             if (this._isCodeLine(l))
                 continue;
-            const item = parseListItem(this._lineText(l));
-            if (item)
-                targets.push({ line: l, item });
+            const info = this._lineInfo(l);
+            if (info.item)
+                targets.push({ line: l, item: info.item, quoteEnd: info.quoteEnd });
         }
         if (targets.length === 0)
             return false; // default Tab behaviour on non-list lines
 
         // Compute the new indentation of every item from the structure before
         // the edit, so a block moves consistently.
-        const [a, b] = this._listBlockRange(first, last);
-        const before = this._scanLists(a, b);
+        const before = [];
+        for (const [a, b] of this._blocksFor(targets.map(t => t.line)))
+            before.push(...this._scanLists(a, b));
         const sourceLines = new Set();
         for (const t of targets) {
             const [list, idx] = this._listOfLine(before, t.line);
@@ -395,13 +430,14 @@ var BulletHandlers = class BulletHandlers {
                 const newIndent = ' '.repeat(t.target);
                 if (newIndent === t.item.indent)
                     continue;
+                const q = t.quoteEnd;
                 if (/^ *$/.test(t.item.indent) && t.target > oldLen)
-                    this._replaceInLine(t.line, text, 0, 0, ' '.repeat(t.target - oldLen));
+                    this._replaceInLine(t.line, text, q, q, ' '.repeat(t.target - oldLen));
                 else if (/^ *$/.test(t.item.indent))
-                    this._replaceInLine(t.line, text, t.target, oldLen, '');
+                    this._replaceInLine(t.line, text, q + t.target, q + oldLen, '');
                 else
-                    this._replaceInLine(t.line, text, 0, oldLen, newIndent);
-                deltas.set(t.line, { oldLen, newLen: t.target });
+                    this._replaceInLine(t.line, text, q, q + oldLen, newIndent);
+                deltas.set(t.line, { start: q, oldLen, newLen: t.target });
             }
 
             const moved = new Set(targets.map(t => t.line));
@@ -450,11 +486,12 @@ var BulletHandlers = class BulletHandlers {
         const iters = marks.map(({ line, col }) => {
             const d = deltas.get(line);
             let newCol = col;
-            if (d && col > 0) {
-                if (col >= d.oldLen)
+            const s = d ? d.start || 0 : 0;
+            if (d && col > s) {
+                if (col >= s + d.oldLen)
                     newCol = col + d.newLen - d.oldLen;
                 else
-                    newCol = Math.min(col, d.newLen);
+                    newCol = Math.min(col, s + d.newLen);
             }
             return TextUtils.iterAtLineOffset(this.buffer, line, newCol);
         });

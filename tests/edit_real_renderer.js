@@ -130,6 +130,37 @@ for (const spec of ['```\n- a|\n```', '<!--\n- a|\n-->', '> plain quote|']) {
     H.assertEq(`Enter not handled: ${JSON.stringify(spec)}`, enter(), false);
 }
 
+// --- Quoted lists: Enter renumbers, Tab / Shift+Tab nest, one undo step each
+function undoOnce() {
+    tv.activate_action('text.undo', null);
+}
+const QUOTED = [
+    // [label, spec, action, expected]
+    ['Enter renumbers quoted list', '> 1. a|\n> 2. b\n> 3. c', enter, '> 1. a\n> 2. |\n> 3. b\n> 4. c'],
+    ['Enter splits quoted item', '> 1. hello| world\n> 2. b', enter, '> 1. hello\n> 2. |world\n> 3. b'],
+    ['Enter in nested quote renumbers', '> > 1. a|\n> > 2. b', enter, '> > 1. a\n> > 2. |\n> > 3. b'],
+    ['Enter leaves outer list alone', '1. x\n> 1. a|\n> 2. b\n2. y', enter, '1. x\n> 1. a\n> 2. |\n> 3. b\n2. y'],
+    ['Tab nests quoted bullet', '> - a\n> - |b', () => bh.indent(), '> - a\n>   - |b'],
+    ['Shift+Tab un-nests quoted bullet', '> - a\n>   - |b', () => bh.outdent(), '> - a\n> - |b'],
+    ['Tab nests quoted number and renumbers', '> 1. a\n> 2. |b\n> 3. c', () => bh.indent(),
+        '> 1. a\n>    1. |b\n> 2. c'],
+    ['Shift+Tab un-nests quoted number', '> 1. a\n>    1. |b\n> 2. c', () => bh.outdent(),
+        '> 1. a\n> 2. |b\n> 3. c'],
+    ['Tab on multi-line quoted selection', '> - a\n> - ⟨b\n> - c⟩', () => bh.indent(),
+        '> - a\n>   - ⟨b\n>   - c⟩'],
+];
+for (const [label, spec, action, expected] of QUOTED) {
+    load(spec);
+    const before = H.text(b);
+    H.assertEq(`${label}: handled`, action(), true);
+    H.assertEq(label, H.state(b), expected);
+    undoOnce();
+    H.assertEq(`${label}: one undo step`, H.text(b), before);
+}
+load('> - a\n> - b|');
+H.assertEq('Tab key on quoted item handled', bh.handleKeyPress(65289, 0), true);
+H.assertEq('Tab key keeps the quote', H.text(b), '> - a\n>   - b');
+
 // --- Tab does not nest list items inside code / comments
 load('<!--\n- a|\n- b\n-->');
 H.assertEq('Tab in comment not handled', bh.handleKeyPress(65289, 0), false);

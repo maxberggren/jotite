@@ -577,7 +577,7 @@ class JotWindow extends Adw.ApplicationWindow {
     async _doResolveUnsaved(purpose) {
         if (this._savePromise)
             await this._savePromise;
-        if (!this._buffer.get_modified()) {
+        if (!this._buffer.get_modified() || this._readOnly) {
             this._removeDraft();
             return true;
         }
