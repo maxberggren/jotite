@@ -121,14 +121,21 @@ var SettingsManager = class SettingsManager {
         return GLib.build_filenamev([this._stateDir, 'settings.last-good.json']);
     }
 
-    // Create the config directory, seeding settings.json and FAQ.md from the
+    // The FAQ shipped with the application. It is opened read-only from the
+    // application directory (never copied into the config directory, where
+    // it would go stale after upgrades).
+    static get faqPath() {
+        return GLib.build_filenamev([_getAppDirectory(), 'FAQ.md']);
+    }
+
+    // Create the config directory, seeding settings.json from the
     // application directory on first use. Returns the config directory.
     _ensureConfigDirectory() {
         if (!GLib.file_test(this._configDir, GLib.FileTest.IS_DIR)) {
             GLib.mkdir_with_parents(this._configDir, 0o755);
         }
         const appDir = _getAppDirectory();
-        for (const name of ['settings.json', 'FAQ.md']) {
+        for (const name of ['settings.json']) {
             const dst = Gio.File.new_for_path(GLib.build_filenamev([this._configDir, name]));
             if (dst.query_exists(null))
                 continue;

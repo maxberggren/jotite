@@ -18,6 +18,7 @@ package() {
     install -Dm755 jotite.js "$pkgdir/usr/share/jotite/jotite.js"
     install -Dm644 constants.js "$pkgdir/usr/share/jotite/constants.js"
     install -Dm644 settings.json "$pkgdir/usr/share/jotite/settings.json"
+    install -Dm644 FAQ.md "$pkgdir/usr/share/jotite/FAQ.md"
     
     # Install directories
     cp -r app "$pkgdir/usr/share/jotite/"

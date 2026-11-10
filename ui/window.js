@@ -263,6 +263,8 @@ class JotWindow extends Adw.ApplicationWindow {
             return { warning: this._settingsManager.error, dirty };
         if (this._file) {
             const path = this._file.get_path() ?? this._file.get_uri();
+            if (this._readOnly)
+                return { text: `${path} (read-only)`, tooltip: `${path} (read-only)`, dirty };
             return { text: path, tooltip: dirty ? `${path} (unsaved changes)` : path, dirty };
         }
         const path = GLib.build_filenamev([FileManager.getJotDirectory(this._settingsManager), this._suggestedName]);
@@ -302,7 +304,7 @@ class JotWindow extends Adw.ApplicationWindow {
                 this._updateSuggestedName();
                 this._statusBar.refresh();
             });
-        if (!this._buffer.get_modified())
+        if (!this._buffer.get_modified() || this._readOnly)
             return;
         if (this._file) {
             if (this._autosaveEnabled() && !this._conflict)
@@ -325,7 +327,7 @@ class JotWindow extends Adw.ApplicationWindow {
     }
 
     _autosave() {
-        if (!this._file || !this._buffer.get_modified() || this._conflict ||
+        if (!this._file || this._readOnly || !this._buffer.get_modified() || this._conflict ||
             this._savePromise || !this._autosaveEnabled())
             return;
         this._writeTo(this._file, { interactive: false }).catch(logError);
@@ -748,8 +750,25 @@ class JotWindow extends Adw.ApplicationWindow {
         const changed = !(file && this._file && file.equal(this._file)) && (file || this._file);
         this._file = file;
         this._etag = etag;
+        this._setReadOnly(!!file && file.get_path() === SettingsManager.faqPath);
         if (changed)
             this._watchFile();
+    }
+
+    // The bundled FAQ is shown read-only: not editable, never autosaved
+    // or saved over (it belongs to the installation).
+    _setReadOnly(readOnly) {
+        if (this._readOnly === readOnly)
+            return;
+        this._readOnly = readOnly;
+        this._textView.set_editable(!readOnly);
+        if (readOnly)
+            this._cancel('autosave');
+        this._statusBar.refresh();
+    }
+
+    get readOnly() {
+        return !!this._readOnly;
     }
 
     // ------------------------------------------------------------------
@@ -817,6 +836,10 @@ class JotWindow extends Adw.ApplicationWindow {
     // Save (Save As for untitled notes or with saveAs). Resolves true only
     // after the text was written successfully; false on cancel or failure.
     save({ saveAs = false } = {}) {
+        if (this._readOnly && !saveAs) {
+            this._flash('This file is read-only — Ctrl+Shift+S saves a copy');
+            return Promise.resolve(false);
+        }
         if (this._savePromise)
             return this._savePromise;
         this._savePromise = this._doSave(saveAs).finally(() => {
@@ -968,8 +991,14 @@ class JotWindow extends Adw.ApplicationWindow {
         this._openConfigFile('settings.json');
     }
 
+    // The FAQ opens read-only from the application directory
     _openFAQ() {
-        this._openConfigFile('FAQ.md');
+        const file = Gio.File.new_for_path(SettingsManager.faqPath);
+        if (!file.query_exists(null)) {
+            this.showError(`Cannot open FAQ: ${file.get_path()} does not exist`);
+            return;
+        }
+        this.application.open([file], '');
     }
 
     _openFileLocation() {

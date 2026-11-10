@@ -50,6 +50,8 @@ var BulletHandlers = class BulletHandlers {
 
     // Returns true when the key was handled (the default action is suppressed).
     handleKeyPress(keyval, state) {
+        if (!this.textView.get_editable())
+            return false; // read-only view (e.g. the FAQ)
         const mods = state & MOD_MASK;
         const ctrl = mods === Constants.CTRL_MASK;
 

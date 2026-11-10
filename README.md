@@ -63,7 +63,7 @@ sudo pacman -S gjs gtk4 libadwaita fontconfig
    ```bash
    # Install the application
    sudo install -d /usr/share/jotite
-   sudo cp -r jotite.js constants.js settings.json app file markdown settings theme ui util /usr/share/jotite/
+   sudo cp -r jotite.js constants.js settings.json FAQ.md app file markdown settings theme ui util /usr/share/jotite/
    printf '#!/bin/sh\nexec gjs /usr/share/jotite/jotite.js "$@"\n' | sudo install -Dm755 /dev/stdin /usr/local/bin/jotite
 
    # Install desktop entry and icon

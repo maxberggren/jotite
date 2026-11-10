@@ -286,6 +286,38 @@ async function run(app) {
     check('link: mailto', LinkHandlers.resolve('mailto:a@b.c', null).kind === 'uri');
     check('link: www', LinkHandlers.resolve('www.example.com', null).uri === 'https://www.example.com');
 
+    // ---- FAQ opens read-only from the app directory (not copied) ---------
+    {
+        const { SettingsManager } = imports.settings.settingsManager;
+        // The app directory is derived from the program path (tests/ here)
+        Object.defineProperty(SettingsManager, 'faqPath', {
+            get: () => `${GLib.get_current_dir()}/FAQ.md`, configurable: true,
+        });
+        const faqPath = SettingsManager.faqPath;
+        const faqBytes = read(faqPath);
+        const host = new JotWindow(app);
+        host.present();
+        host._openFAQ();
+        await sleep(150);
+        const faq = app._jotWindows().find(x => x.getFilePath() === faqPath);
+        check('faq: opened from app dir', !!faq, faqPath);
+        check('faq: not copied to config', !exists(`${root}/config/jotite/FAQ.md`));
+        if (faq) {
+            check('faq: read-only', faq.readOnly && !faq._textView.get_editable());
+            const fb = faq._textView.get_buffer();
+            fb.place_cursor(fb.get_start_iter());
+            check('faq: Ctrl+T ignored', faq._bulletHandlers.handleKeyPress(Constants.KEY_T, Constants.CTRL_MASK) === false);
+            check('faq: save refused', (await faq.save()) === false);
+            check('faq: file untouched', bytesEqual(read(faqPath), faqBytes));
+            host._openFAQ();
+            await sleep(50);
+            check('faq: second open raises same window',
+                app._jotWindows().filter(x => x.getFilePath() === faqPath).length === 1);
+            faq.forceClose();
+        }
+        host.forceClose();
+    }
+
     // ---- Teardown: everything closes cleanly -------------------------------
     for (const x of app._jotWindows()) x.forceClose();
     await sleep(100);

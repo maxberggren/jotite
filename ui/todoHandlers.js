@@ -74,6 +74,8 @@ var TodoHandlers = class TodoHandlers {
 
     // Toggle the checkbox under `iter`. One undo step. Returns true if toggled.
     toggleAtIter(iter) {
+        if (!this.textView.get_editable())
+            return false;
         const box = this.checkboxAtIter(iter);
         if (!box)
             return false;
