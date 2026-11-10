@@ -52,7 +52,17 @@ var LineMovement = class LineMovement {
         const regionLast = direction < 0 ? last : last + 1;
         const start = TextUtils.lineBounds(this.buffer, regionFirst)[0];
         const end = TextUtils.lineBounds(this.buffer, regionLast)[1];
-        const lines = this.buffer.get_text(start, end, true).split('\n');
+        // Split with GtkTextIter line boundaries (they understand \n, \r\n,
+        // \r and U+2029). Line contents move; each line terminator stays in
+        // its position, so line endings are preserved.
+        const lines = [];
+        const terminators = [];
+        for (let l = regionFirst; l <= regionLast; l++) {
+            const [ls, le] = TextUtils.lineBounds(this.buffer, l);
+            lines.push(this.buffer.get_text(ls, le, true));
+            if (l < regionLast)
+                terminators.push(this.buffer.get_text(le, TextUtils.lineBounds(this.buffer, l + 1)[0], true));
+        }
 
         let reordered;
         if (direction < 0)
@@ -69,7 +79,7 @@ var LineMovement = class LineMovement {
         try {
             this.buffer.delete(start, end);
             const at = TextUtils.lineBounds(this.buffer, regionFirst)[0];
-            this.buffer.insert(at, reordered.join('\n'), -1);
+            this.buffer.insert(at, reordered.map((t, k) => t + (terminators[k] || '')).join(''), -1);
 
             // Every remembered position is inside the block, or is the selection
             // end at column 0 just past it; either way it moves with the block.
