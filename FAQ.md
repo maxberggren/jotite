@@ -1,3 +1,5 @@
+*This FAQ (the ? button) opens read-only; Ctrl+Shift+S saves an editable copy.*
+
 ## Keyboard Shortcuts
 
 - **Ctrl+S** or **Ctrl+Enter**: Save note
@@ -6,19 +8,19 @@
 - **Ctrl+O**: Open note
 - **Ctrl+F**: Find (**F3** / **Ctrl+G** next, **Shift+F3** / **Ctrl+Shift+G** previous)
 - **Ctrl+Z** / **Ctrl+Shift+Z** / **Ctrl+Y**: Undo / redo
-- **Ctrl+T**: Toggle the task checkbox on the current line
+- **Ctrl+T**: Toggle the task checkbox on the current line (any line shown as a task, also in quotes)
 - **Ctrl+Plus** / **Ctrl+Minus** / **Ctrl+0**: Zoom in / out / reset (per window)
 - **Ctrl+X**: Cut line (when nothing is selected)
 - **Ctrl+Up/Down**: Move line (or selected lines) up/down
 - **Tab** / **Shift+Tab**: Nest / un-nest a list item, or add / remove a `#` on a heading
-- **Enter**: Continue the list (Enter on an empty item ends it); **Shift+Enter**: plain newline
+- **Enter**: Continue the list or task (also inside `>` quotes; Enter on an empty item ends it); **Shift+Enter**: plain newline
 - **Ctrl+Click**: Open a link
 - **Escape**: Close search, or close the window
 - **Ctrl+Q**: Quit
 
 ### Settings
 
-Click the ⚙ (settings) button in the bottom-right corner to open `settings.json` (`~/.config/jotite/settings.json`). Changes are applied as soon as you save the file. If the file contains a JSON error, Jotite keeps using the last valid settings and shows the error in the status bar (click it to open the file). `//` and `/* */` comments are allowed.
+Click the ⚙ (settings) button in the bottom-right corner to open `settings.json` (`~/.config/jotite/settings.json`). Changes are applied as soon as you save the file. If the file contains a JSON error, Jotite keeps using the last valid settings and shows the error in the status bar (click it to open the file) until the file is valid again. `//` and `/* */` comments are allowed.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -65,8 +67,9 @@ Jotite follows CommonMark/GitHub rules for everything it renders:
 - **Code blocks**: fenced with ```` ``` ```` or `~~~` on their own lines
 - **Links**: `[text](url)`, `<https://…>`, and bare `https://…` URLs; **Images**: `![alt](src)` (shown as the alt text)
 - **Lists**: `-`, `*` or `+` bullets, `1.` or `1)` numbers; **Tab** nests, **Shift+Tab** un-nests
-- **Tasks**: `- [ ] todo` / `- [X] done` (or `[ ]` at the start of a line)
-  - **Double-click** the `[ ]` to toggle it, or press **Ctrl+T** on the line
+- **Tasks**: `- [ ] todo` / `- [X] done`, or a bare `[ ] todo` at the start of a line (also inside quotes: `> - [ ] todo`)
+  - **Double-click** the `[ ]` to toggle it, or press **Ctrl+T** on the line; **Enter** starts the next task
+  - Tasks inside code blocks or `<!-- -->` comments are plain text
 - **Blockquotes**: `> quote` (nest with `> >`)
 - **Horizontal rule**: `---`, `***`, `___` or `* * *`
 - **Escapes**: `\*not italic\*`

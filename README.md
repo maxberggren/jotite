@@ -27,7 +27,7 @@ sudo pacman -S gjs gtk4 libadwaita fontconfig
 
 - Live markdown rendering: markup fades away and reappears when the cursor is near it
 - Gradient-colored headings with configurable "moods"
-- Smart lists: Enter continues bullets, numbers and tasks; Tab nests; numbering stays correct
+- Smart lists: Enter continues bullets, numbers and tasks (also inside `>` quotes); Tab nests; numbering stays correct
 - Autosave for saved notes, recovery drafts for untitled ones, and a warning if the file changes on disk
 - Files round-trip byte-for-byte (CRLF, LF or mixed line endings, BOM and trailing newline are preserved; editing a line leaves the others untouched)
 - Follows your Omarchy theme live
@@ -49,7 +49,7 @@ sudo pacman -S gjs gtk4 libadwaita fontconfig
 - **Tab/Shift+Tab** - Nest/un-nest list items; on a heading, add/remove a `#`
 - **Enter** - Continue a list; Enter on an empty item ends the list
 - **Shift+Enter** - Plain newline (no list continuation)
-- **Double-click a `[ ]`** - Toggle that task ([ ] ↔ [X])
+- **Double-click a `[ ]`** - Toggle that task ([ ] ↔ [X]); works for `- [ ]` items, bare `[ ]` tasks and tasks in quotes
 
 ### Manual Installation (All Distributions)
 
@@ -95,7 +95,7 @@ Open one or more files (a path that doesn't exist yet is created on first save):
 jotite ~/Documents/notes/mynote.md other.md
 ```
 
-Jotite runs as a single instance: launching it again opens files in the running app.
+Jotite runs as a single instance: launching it again opens files in the running app, and plain `jotite` brings the most recently used window to the front (a new note window opens only when none is open).
 
 Run the test suite from the repository root:
 ```bash
