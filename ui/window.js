@@ -417,6 +417,24 @@ class JotWindow extends Adw.ApplicationWindow {
         keyController.connect('key-pressed', (controller, keyval, keycode, state) =>
             this._onKeyPressed(Gdk.keyval_to_lower(keyval), state & MODS));
         this.add_controller(keyController);
+
+        // Ctrl+Enter saves. GtkTextView consumes Ctrl+Return itself (inserts
+        // a newline) before a bubble-phase window controller sees it, so
+        // this one runs in the capture phase, ahead of the text view.
+        const saveKeys = new Gtk.EventControllerKey();
+        saveKeys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE);
+        saveKeys.connect('key-pressed', (controller, keyval, keycode, state) => {
+            if ((state & MODS) !== Gdk.ModifierType.CONTROL_MASK)
+                return false;
+            if (keyval !== Gdk.KEY_Return && keyval !== Gdk.KEY_KP_Enter && keyval !== Gdk.KEY_ISO_Enter)
+                return false;
+            if (this.get_visible_dialog?.())
+                return false;
+            this.save().catch(logError);
+            return true;
+        });
+        this.add_controller(saveKeys);
+        this._saveKeyController = saveKeys;
     }
 
     _onKeyPressed(key, mods) {
@@ -453,7 +471,7 @@ class JotWindow extends Adw.ApplicationWindow {
             }
             return false;
         }
-        if (ctrl && (key === Gdk.KEY_s || key === Gdk.KEY_Return || key === Gdk.KEY_KP_Enter)) {
+        if (ctrl && key === Gdk.KEY_s) {
             this.save().catch(logError);
             return true;
         }

@@ -175,6 +175,22 @@ async function run(app) {
     await sleep(100);
     check('link open: autosaved before replacing', readText(newPath) === 'hello more');
     check('link open: other file loaded', w.getFilePath() === other);
+
+    // Ctrl+Enter / Ctrl+KP_Enter save without inserting a newline: handled
+    // by a capture-phase controller that runs before GtkTextView's own
+    for (const [name, keyval] of [['Return', Gdk.KEY_Return], ['KP_Enter', Gdk.KEY_KP_Enter]]) {
+        const ob = w._textView.get_buffer();
+        ob.place_cursor(ob.get_end_iter());
+        typeText(w, name);
+        const expected = ob.get_text(ob.get_start_iter(), ob.get_end_iter(), false);
+        const ctl = w._saveKeyController;
+        check(`ctrl+${name}: capture phase`, ctl.get_propagation_phase() === Gtk.PropagationPhase.CAPTURE);
+        const handled = ctl.emit('key-pressed', keyval, 36, Gdk.ModifierType.CONTROL_MASK);
+        await sleep(100);
+        check(`ctrl+${name}: handled`, handled === true);
+        check(`ctrl+${name}: buffer unchanged`, ob.get_text(ob.get_start_iter(), ob.get_end_iter(), false) === expected);
+        check(`ctrl+${name}: saved`, readText(other) === expected && !w.hasUnsavedChanges, readText(other));
+    }
     w.forceClose();
 
     // ---- Untitled note: recovery draft, Save in close dialog -------------
