@@ -223,6 +223,19 @@ var MarkdownRenderer = class MarkdownRenderer {
         return FENCE_KINDS.has(this._kinds[lineNumber]);
     }
 
+    // Whether a line belongs to an HTML comment block (<!-- ... -->
+    // starting at the beginning of a line, possibly spanning lines)
+    isInHtmlComment(lineNumber) {
+        this._ensureClassified();
+        return this._kinds[lineNumber] === Kind.HTML;
+    }
+
+    // Whether a line is shown literally (fenced code or HTML comment), so
+    // list/task editing commands must leave it alone
+    isLiteralLine(lineNumber) {
+        return this.isInCodeBlock(lineNumber) || this.isInHtmlComment(lineNumber);
+    }
+
     // Whether the character at iter belongs to an inline code span
     // (including its backticks)
     isInCodeSpan(iter) {

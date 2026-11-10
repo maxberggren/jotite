@@ -84,6 +84,74 @@ function parseListItem(rawLine) {
     };
 }
 
+// Block quote markers at the start of a line ("> ", "> > ", up to three
+// spaces before each '>', one optional space after it).
+const QUOTE_RE = /^(?: {0,3}>[ \t]?)+/;
+
+// The one task/list detector shared by the renderer and every editing
+// command (Ctrl+T, double-click, Enter), so whatever renders as a task can
+// be toggled and continued. Recognises, after optional block quote markers:
+//   - list items (see parseListItem), optionally with a task box: "- [ ] x"
+//   - bare task boxes at the start of the (quoted) line: "[ ] x", "  [x] y"
+// Returns null when the line has none of quote, list item or task box,
+// otherwise:
+//   quote:    { end, depth } or null (end = index after the quote markers)
+//   item:     parseListItem() result for the text after the quote, with
+//             every index (markerStart, markerEnd, contentStart,
+//             checkbox.index) relative to the whole line, or null
+//   checkbox: { index, char, checked } (whole-line index) or null
+//   lead:     text before the list marker / bare box (quote + indentation)
+//   contentStart, content: where the item's text begins
+// All indices are UTF-16 indices into the line; a trailing '\r' is ignored.
+function parseLinePrefix(rawLine) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    let p = 0;
+    let quote = null;
+    const qm = QUOTE_RE.exec(line);
+    if (qm) {
+        p = qm[0].length;
+        let depth = 0;
+        for (let k = 0; k < p; k++) {
+            if (line[k] === '>')
+                depth++;
+        }
+        quote = { end: p, depth };
+    }
+
+    const rest = p > 0 ? line.slice(p) : line;
+    let item = parseListItem(rest);
+    let checkbox = null;
+    let lead;
+    let contentStart;
+    if (item) {
+        if (p > 0) {
+            item.markerStart += p;
+            item.markerEnd += p;
+            item.contentStart += p;
+            if (item.checkbox)
+                item.checkbox.index += p;
+        }
+        checkbox = item.checkbox;
+        lead = line.slice(0, item.markerStart);
+        contentStart = item.contentStart;
+    } else {
+        // Bare task box: "[ ] text" after optional indentation
+        const ws = leadingWhitespace(rest).length;
+        const cb = CHECKBOX_RE.exec(rest.slice(ws));
+        if (cb) {
+            checkbox = { index: p + ws, char: cb[1], checked: cb[1] !== ' ' };
+            contentStart = checkbox.index + 3;
+            contentStart += leadingWhitespace(line.slice(contentStart)).length;
+        } else if (!quote) {
+            return null;
+        } else {
+            contentStart = p;
+        }
+        lead = line.slice(0, checkbox ? checkbox.index : p);
+    }
+    return { quote, item, checkbox, lead, contentStart, content: line.slice(contentStart) };
+}
+
 // Is `b` the same kind of list as `a` (same bullet char / same delimiter)?
 function sameListType(a, b) {
     if (a.ordered !== b.ordered)
@@ -101,6 +169,7 @@ function parseHeader(rawLine) {
 
 var MarkdownList = {
     parseListItem,
+    parseLinePrefix,
     sameListType,
     indentWidth,
     leadingWhitespace,

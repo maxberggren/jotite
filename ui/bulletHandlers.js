@@ -22,7 +22,7 @@ const KEY_ISO_LEFT_TAB = 65056;
 const KEY_KP_TAB = 65417;
 const MOD_MASK = Constants.CTRL_MASK | Constants.SHIFT_MASK | Constants.ALT_MASK;
 
-const { parseListItem, sameListType, indentWidth, leadingWhitespace, parseHeader } = MarkdownList;
+const { parseListItem, parseLinePrefix, sameListType, indentWidth, leadingWhitespace, parseHeader } = MarkdownList;
 
 var BulletHandlers = class BulletHandlers {
     constructor(textView, markdownRenderer, lineMovement) {
@@ -84,8 +84,11 @@ var BulletHandlers = class BulletHandlers {
     // Helpers
     // ------------------------------------------------------------------
 
+    // Fenced code and HTML comment lines are shown literally: no list logic
     _isCodeLine(line) {
         const r = this.markdownRenderer;
+        if (r && typeof r.isLiteralLine === 'function')
+            return r.isLiteralLine(line);
         return !!(r && typeof r.isInCodeBlock === 'function' && r.isInCodeBlock(line));
     }
 
@@ -250,28 +253,42 @@ var BulletHandlers = class BulletHandlers {
         if (this._isCodeLine(line))
             return false;
         const text = this._lineText(line);
-        const item = parseListItem(text);
-        if (!item || item.spacing.length === 0)
+        // Same detector as the renderer: list items and bare "[ ]" tasks,
+        // inside block quotes too
+        const pre = parseLinePrefix(text);
+        if (!pre)
+            return false;
+        const item = pre.item;
+        if (item ? item.spacing.length === 0 : !pre.checkbox)
             return false;
 
         const cursorIdx = TextUtils.indexAt(text, iter.get_line_offset());
-        if (cursorIdx < item.contentStart)
+        if (cursorIdx < pre.contentStart)
             return false;
 
         this.buffer.begin_user_action();
         try {
-            if (item.content.trim() === '') {
-                // Empty item: leave the list (clear the marker).
-                this._replaceInLine(line, text, 0, text.length, '');
+            if (pre.content.trim() === '') {
+                // Empty item: leave the list (clear the marker, stay inside
+                // the block quote if there is one).
+                const keep = pre.quote ? text.slice(0, pre.quote.end) : '';
+                this._replaceInLine(line, text, keep.length, text.length, '');
+                this.buffer.place_cursor(TextUtils.iterAtLineOffset(this.buffer, line,
+                    TextUtils.charLength(keep)));
             } else {
                 const after = text.slice(cursorIdx);
                 const leadingAfter = after.length - after.replace(/^[ \t]+/, '').length;
-                const before = text.slice(item.contentStart, cursorIdx);
+                const before = text.slice(pre.contentStart, cursorIdx);
                 const trailingBefore = before.length - before.replace(/[ \t]+$/, '').length;
 
-                const marker = item.ordered ? `${item.number + 1}${item.delimiter}` : item.bullet;
-                const spacing = item.spacing.includes('\t') ? item.spacing : ' ';
-                const prefix = item.indent + marker + spacing + (item.checkbox ? '[ ] ' : '');
+                let prefix = pre.lead;
+                if (item) {
+                    const marker = item.ordered ? `${item.number + 1}${item.delimiter}` : item.bullet;
+                    const spacing = item.spacing.includes('\t') ? item.spacing : ' ';
+                    prefix += marker + spacing;
+                }
+                if (pre.checkbox)
+                    prefix += '[ ] ';
 
                 const delStart = cursorIdx - trailingBefore;
                 const delEnd = cursorIdx + leadingAfter;
@@ -281,7 +298,7 @@ var BulletHandlers = class BulletHandlers {
                     TextUtils.charLength(prefix));
                 this.buffer.place_cursor(newCursor);
 
-                if (item.ordered) {
+                if (item && item.ordered && !pre.quote) {
                     const fresh = new Set([line + 1]);
                     this._renumber(line, line + 1, fresh, new Set(), fresh);
                 }
@@ -451,23 +468,25 @@ var BulletHandlers = class BulletHandlers {
         return this.toggleTodoOnLine(line);
     }
 
-    // Toggle the checkbox of the task item on `line`. Returns false when the
-    // line is not a task list item (or is inside code).
+    // Toggle the checkbox of the task on `line` (list item task, bare "[ ]"
+    // task, quoted or not). Returns false when the line has no task box or
+    // is shown literally (code, HTML comment).
     toggleTodoOnLine(line) {
         if (this._isCodeLine(line))
             return false;
         const text = this._lineText(line);
-        const item = parseListItem(text);
-        if (!item || !item.checkbox)
+        const pre = parseLinePrefix(text);
+        const checkbox = pre && pre.checkbox;
+        if (!checkbox)
             return false;
-        const charIdx = item.checkbox.index + 1;
-        if (this._isCodeSpan(this._iterAt(line, text, item.checkbox.index)))
+        const charIdx = checkbox.index + 1;
+        if (this._isCodeSpan(this._iterAt(line, text, checkbox.index)))
             return false;
 
         const marks = this._saveSelection();
         this.buffer.begin_user_action();
         try {
-            this._replaceInLine(line, text, charIdx, charIdx + 1, item.checkbox.checked ? ' ' : 'X');
+            this._replaceInLine(line, text, charIdx, charIdx + 1, checkbox.checked ? ' ' : 'X');
             this._restoreSelection(marks, new Map());
         } finally {
             this.buffer.end_user_action();

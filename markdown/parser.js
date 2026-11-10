@@ -26,6 +26,8 @@
 // Not supported: setext headings (a "---" line is always a thematic break),
 // indented code blocks, reference links, tables, multi-line emphasis.
 
+const { MarkdownList } = imports.util.markdownList;
+
 var Kind = {
     TEXT: 0,
     BLANK: 1,
@@ -49,10 +51,6 @@ const HR_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const HEADING_RE = /^( {0,3})(#{1,6})(?:[ \t]+|$)/;
 const HTML_OPEN_RE = /^ {0,3}<!--/;
 const BLANK_RE = /^[ \t]*$/;
-const QUOTE_RE = /^(?: {0,3}>[ \t]?)+/;
-const BULLET_RE = /^([ \t]*)([-*+])([ \t]+)/;
-const ORDERED_RE = /^([ \t]*)(\d{1,9})([.)])([ \t]+)/;
-const TASK_RE = /^\[([ xX])\](?=[ \t]|$)/;
 const AUTOLINK_RE = /^<([A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*)>/;
 const EMAIL_AUTOLINK_RE = /^<([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~\-]+@[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*)>/;
 const BARE_URL_RE = /(?:https?|ftp):\/\/[^\s<>]+/g;
@@ -479,51 +477,44 @@ function processEmphasis(delims, model) {
     }
 }
 
-// Parse the block prefix of a TEXT line (quote markers, list marker, task box)
+// Parse the block prefix of a TEXT line (quote markers, list marker, task
+// box). Uses the same detector as the editing commands (Ctrl+T, Enter,
+// double-click), so everything rendered as a task can be toggled.
 function parseTextLine(t, model) {
-    let p = 0;
-    const qm = QUOTE_RE.exec(t);
-    if (qm) {
-        let depth = 0;
-        for (let k = 0; k < qm[0].length; k++) {
-            if (t[k] === '>') {
-                span(model, k, k + 1, 'quote-marker');
-                depth++;
-            }
+    const pre = MarkdownList.parseLinePrefix(t);
+    if (!pre) {
+        parseInline(t, 0, t.length, model);
+        return;
+    }
+    const p = pre.quote ? pre.quote.end : 0;
+    if (pre.quote) {
+        for (let k = 0; k < p; k++) {
+            if (t[k] === '>') span(model, k, k + 1, 'quote-marker');
         }
-        p = qm[0].length;
-        model.quote = { depth };
+        model.quote = { depth: pre.quote.depth };
         span(model, p, t.length, 'blockquote');
     }
 
-    const rest = t.slice(p);
     let q = p;
-    let m;
-    if ((m = BULLET_RE.exec(rest))) {
-        const s = p + m[1].length;
-        const type = m[2] === '*' ? 'star' : (m[2] === '-' ? 'dash' : 'plus');
-        model.list = { type, s, e: s + 1 };
-        if (type === 'star') mark(model, s, s + 1, 'bullet-star', 'bullet-star-near', s, s + 1);
-        else span(model, s, s + 1, 'bullet-dash');
-        q = p + m[0].length;
-    } else if ((m = ORDERED_RE.exec(rest))) {
-        const s = p + m[1].length;
-        const e = s + m[2].length + 1;
-        model.list = { type: 'ordered', s, e };
-        span(model, s, e, 'numbered-list-number');
-        q = p + m[0].length;
+    const item = pre.item;
+    if (item) {
+        const s = item.markerStart;
+        if (item.ordered) {
+            model.list = { type: 'ordered', s, e: item.markerEnd };
+            span(model, s, item.markerEnd, 'numbered-list-number');
+        } else {
+            const type = item.bullet === '*' ? 'star' : (item.bullet === '-' ? 'dash' : 'plus');
+            model.list = { type, s, e: s + 1 };
+            if (type === 'star') mark(model, s, s + 1, 'bullet-star', 'bullet-star-near', s, s + 1);
+            else span(model, s, s + 1, 'bullet-dash');
+        }
+        q = item.markerEnd + item.spacing.length;
     }
 
-    // Task box: after a list marker, or at the start of the line
     let box = -1;
-    let boxPos = q;
-    if (!model.list) {
-        while (boxPos < t.length && (t[boxPos] === ' ' || t[boxPos] === '\t')) boxPos++;
-    }
-    const tm = TASK_RE.exec(t.slice(boxPos));
-    if (tm) {
-        box = boxPos;
-        const checked = tm[1] !== ' ';
+    if (pre.checkbox) {
+        box = pre.checkbox.index;
+        const checked = pre.checkbox.checked;
         model.task = { s: box, checked };
         const off = checked ? 'todo-checked' : 'todo-unchecked';
         const on = checked ? 'todo-checked-inside' : 'todo-unchecked-inside';
@@ -532,17 +523,15 @@ function parseTextLine(t, model) {
         mark(model, box + 1, box + 2, null, 'dim', box, box + 3);
         mark(model, box + 2, box + 3, 'invisible', 'dim', box, box + 3);
         q = box + 3;
+        if (checked) span(model, pre.contentStart, t.length, 'todo-checked-text');
     }
 
-    let contentStart = q;
-    while (contentStart < t.length && (t[contentStart] === ' ' || t[contentStart] === '\t'))
-        contentStart++;
-    if (box >= 0 && model.task.checked) span(model, contentStart, t.length, 'todo-checked-text');
-
-    if (model.list || model.task || model.quote) {
-        const end = (model.list || model.task) ? contentStart : p;
+    if (model.list || model.task) {
+        const end = pre.contentStart;
         model.prefix = { text: t.slice(0, end), end, box };
-        if (model.list || model.task) span(model, 0, t.length, 'list-item');
+        span(model, 0, t.length, 'list-item');
+    } else {
+        model.prefix = { text: t.slice(0, p), end: p, box };
     }
 
     parseInline(t, q, t.length, model);

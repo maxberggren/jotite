@@ -8,7 +8,8 @@ const { MarkdownList } = imports.util.markdownList;
 //
 // Double-clicking the checkbox ("[ ]" / "[x]") of a task list item toggles it.
 // Only a double-click that lands on the three checkbox characters of a real
-// task item (list marker + checkbox, outside code) is claimed; every other
+// task (list item or bare "[ ]" box, also inside block quotes; never in code
+// or HTML comments) is claimed; every other
 // click — single clicks, drags, shift-clicks, double-clicks on words — is left
 // entirely to GtkTextView.
 
@@ -52,20 +53,23 @@ var TodoHandlers = class TodoHandlers {
     checkboxAtIter(iter) {
         const line = iter.get_line();
         const r = this.markdownRenderer;
-        if (r && typeof r.isInCodeBlock === 'function' && r.isInCodeBlock(line))
+        if (r && typeof r.isLiteralLine === 'function' ? r.isLiteralLine(line)
+            : (r && typeof r.isInCodeBlock === 'function' && r.isInCodeBlock(line)))
             return null;
         const text = TextUtils.lineText(this.buffer, line);
-        const item = MarkdownList.parseListItem(text);
-        if (!item || !item.checkbox)
+        // Same detector as the renderer and Ctrl+T
+        const pre = MarkdownList.parseLinePrefix(text);
+        if (!pre || !pre.checkbox)
             return null;
-        const start = TextUtils.offsetAt(text, item.checkbox.index);
+        const checkbox = pre.checkbox;
+        const start = TextUtils.offsetAt(text, checkbox.index);
         const col = iter.get_line_offset();
         if (col < start || col > start + 2)
             return null;
         const boxIter = TextUtils.iterAtLineOffset(this.buffer, line, start);
         if (r && typeof r.isInCodeSpan === 'function' && r.isInCodeSpan(boxIter))
             return null;
-        return { line, start, checked: item.checkbox.checked };
+        return { line, start, checked: checkbox.checked };
     }
 
     // Toggle the checkbox under `iter`. One undo step. Returns true if toggled.
