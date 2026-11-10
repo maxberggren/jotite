@@ -1,16 +1,47 @@
-const { Gtk, Gdk } = imports.gi;
+const { Gtk, Gdk, GLib } = imports.gi;
 const { Constants } = imports.constants;
+const { TextUtils } = imports.util.text;
 
 // ============================================================================
 // Search Bar Component
 // ============================================================================
+//
+// Searches the raw buffer text (case-insensitive unless "Aa" is active).
+// Matches are buffer offsets (code points) and are recomputed, debounced,
+// whenever the buffer changes while the bar is open, so highlights and
+// next/previous never go stale. Highlighting uses the bar's own tags.
+
+const MAX_HIGHLIGHTS = 2000;     // matches beyond this are counted, not tinted
+const REFRESH_DELAY_MS = 150;    // debounce for re-searching after edits
+const MATCH_TAG = 'jotite-search-match';
+const CURRENT_TAG = 'jotite-search-current';
+
+function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function rgba(hex, alpha) {
+    const c = new Gdk.RGBA();
+    if (!hex || !c.parse(hex))
+        c.parse('#888888');
+    c.alpha = alpha;
+    return c;
+}
 
 var SearchBarComponent = class SearchBarComponent {
-    constructor(window, textView, markdownRenderer) {
+    constructor(window, textView, markdownRenderer, colors = null) {
         this.window = window;
         this.textView = textView;
         this.markdownRenderer = markdownRenderer;
-        
+        this.buffer = textView.get_buffer();
+        this._colors = colors || (window && window._themeManager ? window._themeManager.colors : null);
+        this._matchTag = null;
+        this._currentTag = null;
+        this._currentRange = null;   // [start, end] offsets carrying CURRENT_TAG
+        this._anchorMark = null;     // start of the current match; follows edits
+        this._refreshId = 0;
+        this._changedId = this.buffer.connect('changed', () => this._scheduleRefresh());
+
         this.searchBar = null;
         this.searchEntry = null;
         this.matchCountLabel = null;
@@ -138,43 +169,30 @@ var SearchBarComponent = class SearchBarComponent {
     }
 
     show() {
-        // Check if search is already open
-        const alreadyOpen = this.searchBar.get_search_mode();
-        
-        // Enable search mode in markdown renderer to prevent interference
-        if (this.markdownRenderer) {
-            this.markdownRenderer._searchMode = true;
-        }
-        
+        const alreadyOpen = this.isOpen();
+
         this.searchBar.set_search_mode(true);
         this.searchEntry.grab_focus();
-        
+
         if (alreadyOpen) {
-            // If search is already open, just select all text in search box
             this.searchEntry.select_region(0, -1);
-        } else {
-            // If opening fresh, check if there's selected text to use as search term
-            const buffer = this.textView.get_buffer();
-            const [hasSelection, selStart, selEnd] = buffer.get_selection_bounds();
-            if (hasSelection) {
-                const selectedText = buffer.get_text(selStart, selEnd, false);
-                if (selectedText && selectedText.indexOf('\n') === -1) { // Only if single line
-                    this.searchEntry.set_text(selectedText);
-                    this.searchEntry.select_region(0, -1); // Select all text in entry
-                }
+            return;
+        }
+        // Opening fresh: a single-line selection becomes the search term.
+        const [hasSelection, selStart, selEnd] = this.buffer.get_selection_bounds();
+        if (hasSelection) {
+            const selectedText = this.buffer.get_text(selStart, selEnd, true);
+            if (selectedText && selectedText.indexOf('\n') === -1) {
+                this.searchEntry.set_text(selectedText);
+                this.searchEntry.select_region(0, -1);
             }
-            
-            this.performSearch();
         }
+        this.performSearch();
     }
-    
+
     hide() {
-        // Disable search mode in markdown renderer
-        if (this.markdownRenderer) {
-            this.markdownRenderer._searchMode = false;
-        }
-        
         this.searchBar.set_search_mode(false);
+        this._cancelRefresh();
         this.clearHighlights();
         this.searchMatches = [];
         this.currentMatchIndex = -1;
@@ -183,137 +201,223 @@ var SearchBarComponent = class SearchBarComponent {
     }
 
     isOpen() {
-        return this.searchBar.get_search_mode();
+        return !!this.searchBar && this.searchBar.get_search_mode();
     }
-    
-    performSearch() {
-        const searchText = this.searchEntry.get_text();
-        const buffer = this.textView.get_buffer();
-        
-        // Clear previous highlights
+
+    // Theme change: recolor the highlight tags.
+    updateColors(colors) {
+        this._colors = colors;
+        if (this._matchTag)
+            this._matchTag.background_rgba = rgba(colors && colors.yellow, 0.3);
+        if (this._currentTag)
+            this._currentTag.background_rgba = rgba(colors && colors.blue, 0.5);
+    }
+
+    destroy() {
+        this._cancelRefresh();
+        if (this._changedId) {
+            this.buffer.disconnect(this._changedId);
+            this._changedId = 0;
+        }
+        if (this._anchorMark) {
+            this.buffer.delete_mark(this._anchorMark);
+            this._anchorMark = null;
+        }
+    }
+
+    _ensureTags() {
+        if (this._matchTag)
+            return;
+        // Created lazily (after the renderer's tags) so they take priority.
+        const table = this.buffer.get_tag_table();
+        this._matchTag = table.lookup(MATCH_TAG);
+        if (!this._matchTag) {
+            this._matchTag = new Gtk.TextTag({ name: MATCH_TAG });
+            table.add(this._matchTag);
+        }
+        this._currentTag = table.lookup(CURRENT_TAG);
+        if (!this._currentTag) {
+            this._currentTag = new Gtk.TextTag({ name: CURRENT_TAG });
+            table.add(this._currentTag);
+        }
+        this.updateColors(this._colors);
+    }
+
+    _scheduleRefresh() {
+        if (!this.isOpen() || !this.searchEntry.get_text())
+            return;
+        this._cancelRefresh();
+        this._refreshId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, REFRESH_DELAY_MS, () => {
+            this._refreshId = 0;
+            this._refresh(false);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _cancelRefresh() {
+        if (this._refreshId) {
+            GLib.source_remove(this._refreshId);
+            this._refreshId = 0;
+        }
+    }
+
+    // Run a pending post-edit refresh now (before navigating).
+    _flushRefresh() {
+        if (this._refreshId) {
+            this._cancelRefresh();
+            this._refresh(false);
+        }
+    }
+
+    // All matches of `searchText` as [{start, end}] buffer (code point) offsets.
+    findMatches(searchText, caseSensitive) {
+        if (!searchText)
+            return [];
+        const [start, end] = this.buffer.get_bounds();
+        const text = this.buffer.get_text(start, end, true);
+        const re = new RegExp(escapeRegExp(searchText), caseSensitive ? 'gu' : 'giu');
+        const indices = [];
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            if (m[0].length === 0) {
+                re.lastIndex++;
+                continue;
+            }
+            indices.push(m.index, m.index + m[0].length);
+        }
+        const offsets = TextUtils.offsetsAt(text, indices);
+        const matches = [];
+        for (let i = 0; i < offsets.length; i += 2)
+            matches.push({ start: offsets[i], end: offsets[i + 1] });
+        return matches;
+    }
+
+    // Recompute matches. With `select`, the first match at/after the cursor
+    // becomes current and is selected (typing in the entry); otherwise the
+    // current match stays where it was (buffer edits) and nothing moves.
+    _refresh(select) {
         this.clearHighlights();
-        this.searchMatches = [];
+        const searchText = this.searchEntry.get_text();
+        this.searchMatches = this.findMatches(searchText, this.caseSensitiveButton.get_active());
         this.currentMatchIndex = -1;
-        
+
         if (!searchText) {
             this.matchCountLabel.set_label('');
             this.matchCountLabel.set_visible(false);
             return;
         }
-        
-        // Get search flags
-        const caseSensitive = this.caseSensitiveButton.get_active();
-        let flags = Gtk.TextSearchFlags.VISIBLE_ONLY | Gtk.TextSearchFlags.TEXT_ONLY;
-        if (!caseSensitive) {
-            flags |= Gtk.TextSearchFlags.CASE_INSENSITIVE;
-        }
-        
-        // Find all matches
-        const [start, end] = buffer.get_bounds();
-        let searchIter = start.copy();
-        
-        while (true) {
-            const result = searchIter.forward_search(searchText, flags, end);
-            
-            // forward_search returns [found, match_start, match_end] where found is boolean
-            if (!result || !result[0]) break;
-            
-            const matchStart = result[1];
-            const matchEnd = result[2];
-            
-            if (!matchStart || !matchEnd) break;
-            
-            this.searchMatches.push({
-                start: matchStart.get_offset(),
-                end: matchEnd.get_offset()
-            });
-            
-            // Highlight this match
-            buffer.apply_tag_by_name('search-highlight', matchStart, matchEnd);
-            
-            // Move search iter forward
-            searchIter = matchEnd.copy();
-        }
-        
-        // Update match count
-        if (this.searchMatches.length > 0) {
-            this.currentMatchIndex = 0;
-            this.highlightCurrentMatch(false); // Don't grab focus during search
-            this.matchCountLabel.set_visible(true);
-            this.matchCountLabel.set_label(`${this.currentMatchIndex + 1} of ${this.searchMatches.length}`);
-        } else {
-            this.matchCountLabel.set_visible(true);
+        this.matchCountLabel.set_visible(true);
+        if (this.searchMatches.length === 0) {
             this.matchCountLabel.set_label('No matches');
+            return;
         }
-    }
-    
-    findNext() {
-        if (this.searchMatches.length === 0) return;
-        
-        this.currentMatchIndex = (this.currentMatchIndex + 1) % this.searchMatches.length;
-        this.highlightCurrentMatch(true); // Grab focus when navigating
-        this.matchCountLabel.set_label(`${this.currentMatchIndex + 1} of ${this.searchMatches.length}`);
-    }
-    
-    findPrevious() {
-        if (this.searchMatches.length === 0) return;
-        
-        this.currentMatchIndex = (this.currentMatchIndex - 1 + this.searchMatches.length) % this.searchMatches.length;
-        this.highlightCurrentMatch(true); // Grab focus when navigating
-        this.matchCountLabel.set_label(`${this.currentMatchIndex + 1} of ${this.searchMatches.length}`);
-    }
-    
-    findNextKeepFocus() {
-        if (this.searchMatches.length === 0) return;
-        
-        this.currentMatchIndex = (this.currentMatchIndex + 1) % this.searchMatches.length;
-        this.highlightCurrentMatch(false); // Don't grab focus - stay in search box
-        this.matchCountLabel.set_label(`${this.currentMatchIndex + 1} of ${this.searchMatches.length}`);
-    }
-    
-    findPreviousKeepFocus() {
-        if (this.searchMatches.length === 0) return;
-        
-        this.currentMatchIndex = (this.currentMatchIndex - 1 + this.searchMatches.length) % this.searchMatches.length;
-        this.highlightCurrentMatch(false); // Don't grab focus - stay in search box
-        this.matchCountLabel.set_label(`${this.currentMatchIndex + 1} of ${this.searchMatches.length}`);
-    }
-    
-    highlightCurrentMatch(grabFocus = false) {
-        if (this.currentMatchIndex < 0 || this.currentMatchIndex >= this.searchMatches.length) return;
-        
-        const buffer = this.textView.get_buffer();
-        
-        // Remove current match highlight from all matches
-        for (const match of this.searchMatches) {
-            const matchStart = buffer.get_iter_at_offset(match.start);
-            const matchEnd = buffer.get_iter_at_offset(match.end);
-            buffer.remove_tag_by_name('search-current', matchStart, matchEnd);
-        }
-        
-        // Highlight and SELECT current match
-        const currentMatch = this.searchMatches[this.currentMatchIndex];
-        const matchStart = buffer.get_iter_at_offset(currentMatch.start);
-        const matchEnd = buffer.get_iter_at_offset(currentMatch.end);
-        buffer.apply_tag_by_name('search-current', matchStart, matchEnd);
-        
-        // Create selection using buffer.select_range
-        buffer.select_range(matchStart, matchEnd);
-        
-        // Scroll to make the match visible
-        this.textView.scroll_to_iter(matchStart, 0.0, true, 0.5, 0.5);
-        
-        // Give focus to textview so selection is visible (only when explicitly requested)
-        if (grabFocus) {
-            this.textView.grab_focus();
-        }
-    }
-    
-    clearHighlights() {
-        const buffer = this.textView.get_buffer();
-        const [start, end] = buffer.get_bounds();
-        buffer.remove_tag_by_name('search-highlight', start, end);
-        buffer.remove_tag_by_name('search-current', start, end);
-    }
-}
 
+        this._ensureTags();
+        const n = Math.min(this.searchMatches.length, MAX_HIGHLIGHTS);
+        for (let i = 0; i < n; i++) {
+            const m = this.searchMatches[i];
+            this.buffer.apply_tag(this._matchTag,
+                this.buffer.get_iter_at_offset(m.start), this.buffer.get_iter_at_offset(m.end));
+        }
+
+        let anchor;
+        if (select) {
+            const [hasSel, selStart] = this.buffer.get_selection_bounds();
+            anchor = hasSel ? selStart.get_offset()
+                : this.buffer.get_iter_at_mark(this.buffer.get_insert()).get_offset();
+        } else {
+            anchor = this._anchorMark ? this.buffer.get_iter_at_mark(this._anchorMark).get_offset() : 0;
+        }
+        const idx = this._firstMatchAtOrAfter(anchor);
+        this.currentMatchIndex = idx < 0 ? 0 : idx;
+        this._showCurrent(select, false);
+    }
+
+    _firstMatchAtOrAfter(offset) {
+        let lo = 0, hi = this.searchMatches.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (this.searchMatches[mid].start < offset)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo < this.searchMatches.length ? lo : -1;
+    }
+
+    performSearch() {
+        this._cancelRefresh();
+        this._refresh(true);
+    }
+
+    _step(delta, grabFocus) {
+        this._flushRefresh();
+        const count = this.searchMatches.length;
+        if (count === 0)
+            return;
+        this.currentMatchIndex = (this.currentMatchIndex + delta + count) % count;
+        this.highlightCurrentMatch(grabFocus);
+    }
+
+    findNext() {
+        this._step(1, true);
+    }
+
+    findPrevious() {
+        this._step(-1, true);
+    }
+
+    findNextKeepFocus() {
+        this._step(1, false);
+    }
+
+    findPreviousKeepFocus() {
+        this._step(-1, false);
+    }
+
+    highlightCurrentMatch(grabFocus = false) {
+        this._showCurrent(true, grabFocus);
+    }
+
+    // Move the "current" tint from the previous current match to the new one
+    // (O(1), not O(matches)); optionally select and scroll to it.
+    _showCurrent(select, grabFocus) {
+        if (this.currentMatchIndex < 0 || this.currentMatchIndex >= this.searchMatches.length)
+            return;
+        this._ensureTags();
+        const buffer = this.buffer;
+        if (this._currentRange) {
+            buffer.remove_tag(this._currentTag,
+                buffer.get_iter_at_offset(this._currentRange[0]),
+                buffer.get_iter_at_offset(this._currentRange[1]));
+        }
+        const match = this.searchMatches[this.currentMatchIndex];
+        const matchStart = buffer.get_iter_at_offset(match.start);
+        const matchEnd = buffer.get_iter_at_offset(match.end);
+        buffer.apply_tag(this._currentTag, matchStart, matchEnd);
+        this._currentRange = [match.start, match.end];
+
+        if (this._anchorMark)
+            buffer.move_mark(this._anchorMark, matchStart);
+        else
+            this._anchorMark = buffer.create_mark(null, matchStart, true);
+
+        this.matchCountLabel.set_label(`${this.currentMatchIndex + 1} of ${this.searchMatches.length}`);
+
+        if (select) {
+            buffer.select_range(matchStart, matchEnd);
+            this.textView.scroll_to_iter(matchStart, 0.0, true, 0.5, 0.5);
+            if (grabFocus)
+                this.textView.grab_focus();
+        }
+    }
+
+    clearHighlights() {
+        const [start, end] = this.buffer.get_bounds();
+        if (this._matchTag)
+            this.buffer.remove_tag(this._matchTag, start, end);
+        if (this._currentTag)
+            this.buffer.remove_tag(this._currentTag, start, end);
+        this._currentRange = null;
+    }
+};

@@ -1,181 +1,95 @@
-const { Gtk, GLib } = imports.gi;
+const { Gtk } = imports.gi;
 const { TextUtils } = imports.util.text;
+const { MarkdownList } = imports.util.markdownList;
 
 // ============================================================================
 // TODO Handlers Component
 // ============================================================================
+//
+// Double-clicking the checkbox ("[ ]" / "[x]") of a task list item toggles it.
+// Only a double-click that lands on the three checkbox characters of a real
+// task item (list marker + checkbox, outside code) is claimed; every other
+// click — single clicks, drags, shift-clicks, double-clicks on words — is left
+// entirely to GtkTextView.
 
 var TodoHandlers = class TodoHandlers {
     constructor(textView, markdownRenderer) {
         this.textView = textView;
         this.markdownRenderer = markdownRenderer;
         this.buffer = textView.get_buffer();
-        
-        // Track click state for double-click detection
-        this.clickState = {
-            lastClickTime: 0,
-            lastClickOffset: -1,
-            timeoutId: null
-        };
+        this._gesture = null;
     }
 
     setup() {
-        const clickGesture = new Gtk.GestureClick();
-        
-        clickGesture.connect('pressed', (gesture, n_press, x, y) => {
-            this._handleClick(gesture, x, y);
+        this._gesture = new Gtk.GestureClick({ button: 1 });
+        // Capture phase: decide before GtkTextView's own gesture selects a word.
+        this._gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE);
+        this._gesture.connect('pressed', (gesture, nPress, x, y) => {
+            if (nPress !== 2)
+                return;
+            const iter = this._iterAtPoint(x, y);
+            if (iter && this.toggleAtIter(iter))
+                gesture.set_state(Gtk.EventSequenceState.CLAIMED);
         });
-        
-        this.textView.add_controller(clickGesture);
+        this.textView.add_controller(this._gesture);
     }
 
-    _handleClick(gesture, x, y) {
-        // Convert window coordinates to buffer coordinates
-        const [bufferX, bufferY] = this.textView.window_to_buffer_coords(
-            Gtk.TextWindowType.WIDGET, x, y
-        );
-        
-        // Get the iter at the click position
-        const [isInside, iter] = this.textView.get_iter_at_location(bufferX, bufferY);
-        if (!isInside) {
-            return;
+    destroy() {
+        if (this._gesture) {
+            this.textView.remove_controller(this._gesture);
+            this._gesture = null;
         }
-        
-        const clickOffset = iter.get_offset();
-        const currentTime = Date.now();
-        
-        // Find if we clicked on a TODO box or TODO line
-        const [start, end] = this.buffer.get_bounds();
-        const text = this.buffer.get_text(start, end, false);
-        
-        // Find all TODO patterns in the text
-        const todoPattern = /\[([ Xx])\]/g;
-        let match;
-        let clickedTodo = null;
-        
-        let lineStart = 0;
-        const lines = text.split('\n');
-        
-        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-            const line = lines[lineIdx];
-            const lineEnd = lineStart + TextUtils.charLength(line);
-            
-            // Check if click is within this line
-            if (clickOffset >= lineStart && clickOffset <= lineEnd) {
-                // Search for TODO patterns in this line
-                todoPattern.lastIndex = 0;
-                while ((match = todoPattern.exec(line)) !== null) {
-                    const todoStart = lineStart + TextUtils.charLength(line.slice(0, match.index));
-                    const todoEnd = todoStart + 3; // Length of [ ] or [X]
-                    
-                    // Check if this line has a TODO (anywhere on the line counts)
-                    if (match) {
-                        clickedTodo = {
-                            start: todoStart,
-                            end: todoEnd,
-                            isChecked: match[1] === 'X' || match[1] === 'x',
-                            checkChar: match[1],
-                            lineStart: lineStart,
-                            lineEnd: lineEnd
-                        };
-                        break;
-                    }
-                }
-                break;
-            }
-            
-            lineStart = lineEnd + 1; // +1 for newline
+    }
+
+    _iterAtPoint(x, y) {
+        const [bx, by] = this.textView.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, x, y);
+        const [inside, iter] = this.textView.get_iter_at_location(bx, by);
+        return inside ? iter : null;
+    }
+
+    // Returns the checkbox position of the task item at `iter` when iter is on
+    // one of its three checkbox characters, otherwise null.
+    checkboxAtIter(iter) {
+        const line = iter.get_line();
+        const r = this.markdownRenderer;
+        if (r && typeof r.isInCodeBlock === 'function' && r.isInCodeBlock(line))
+            return null;
+        const text = TextUtils.lineText(this.buffer, line);
+        const item = MarkdownList.parseListItem(text);
+        if (!item || !item.checkbox)
+            return null;
+        const start = TextUtils.offsetAt(text, item.checkbox.index);
+        const col = iter.get_line_offset();
+        if (col < start || col > start + 2)
+            return null;
+        const boxIter = TextUtils.iterAtLineOffset(this.buffer, line, start);
+        if (r && typeof r.isInCodeSpan === 'function' && r.isInCodeSpan(boxIter))
+            return null;
+        return { line, start, checked: item.checkbox.checked };
+    }
+
+    // Toggle the checkbox under `iter`. One undo step. Returns true if toggled.
+    toggleAtIter(iter) {
+        const box = this.checkboxAtIter(iter);
+        if (!box)
+            return false;
+
+        this.buffer.begin_user_action();
+        try {
+            const s = TextUtils.iterAtLineOffset(this.buffer, box.line, box.start + 1);
+            const e = TextUtils.iterAtLineOffset(this.buffer, box.line, box.start + 2);
+            this.buffer.delete(s, e);
+            const at = TextUtils.iterAtLineOffset(this.buffer, box.line, box.start + 1);
+            this.buffer.insert(at, box.checked ? ' ' : 'X', -1);
+            // Park the cursor at the end of the line so the rendered checkbox
+            // stays rendered instead of revealing its raw markdown.
+            this.buffer.place_cursor(TextUtils.lineBounds(this.buffer, box.line)[1]);
+        } finally {
+            this.buffer.end_user_action();
         }
-        
-        // If we clicked on a TODO line
-        if (clickedTodo) {
-            const timeSinceLastClick = currentTime - this.clickState.lastClickTime;
-            // Consider it the same TODO if we click anywhere on the same TODO line
-            const isSameTodo = clickedTodo.lineStart === this.clickState.lastClickOffset;
-            
-            // Check if this is a double-click (within 400ms on the same TODO line)
-            if (isSameTodo && timeSinceLastClick < 400) {
-                // Double-click detected - toggle the TODO status
-                
-                // Cancel the single-click timeout if it exists
-                if (this.clickState.timeoutId) {
-                    GLib.source_remove(this.clickState.timeoutId);
-                    this.clickState.timeoutId = null;
-                }
-                
-                // Toggle the TODO status
-                this.buffer.begin_user_action();
-                
-                const startIter = this.buffer.get_iter_at_offset(clickedTodo.start);
-                const endIter = this.buffer.get_iter_at_offset(clickedTodo.end);
-                
-                // Delete the old TODO
-                this.buffer.delete(startIter, endIter);
-                
-                // Insert the new TODO with toggled status
-                const newStartIter = this.buffer.get_iter_at_offset(clickedTodo.start);
-                const newTodo = clickedTodo.isChecked ? '[ ]' : '[X]';
-                this.buffer.insert(newStartIter, newTodo, -1);
-                
-                this.buffer.end_user_action();
-                
-                // Move cursor away from the TODO box to prevent it from showing the markdown
-                const lineStartIter = this.buffer.get_iter_at_offset(clickedTodo.start);
-                lineStartIter.set_line_offset(0);
-                const lineEndIter = lineStartIter.copy();
-                if (!lineEndIter.ends_line()) {
-                    lineEndIter.forward_to_line_end();
-                }
-                
-                // Place cursor at end of line, ensuring no selection
-                this.buffer.place_cursor(lineEndIter);
-                
-                // Force immediate re-render
-                if (this.markdownRenderer) {
-                    this.markdownRenderer._updateSyntaxVisibility();
-                }
-                
-                // Reset click state
-                this.clickState.lastClickTime = 0;
-                this.clickState.lastClickOffset = -1;
-                
-                // Prevent default behavior
-                gesture.set_state(Gtk.EventSequenceState.CLAIMED);
-            } else {
-                // First click - record it and wait for potential second click
-                
-                this.clickState.lastClickTime = currentTime;
-                this.clickState.lastClickOffset = clickedTodo.lineStart;
-                
-                // Set up a timeout to allow normal behavior if no second click comes
-                if (this.clickState.timeoutId) {
-                    GLib.source_remove(this.clickState.timeoutId);
-                }
-                
-                this.clickState.timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 400, () => {
-                    // Timeout expired - let the normal single-click behavior happen
-                    this.clickState.timeoutId = null;
-                    
-                    // Place cursor at the clicked position to show the markdown
-                    const cursorIter = this.buffer.get_iter_at_offset(clickOffset);
-                    this.buffer.place_cursor(cursorIter);
-                    
-                    return false; // Don't repeat
-                });
-                
-                // Prevent immediate cursor placement to wait for double-click
-                gesture.set_state(Gtk.EventSequenceState.CLAIMED);
-            }
-        } else {
-            // Clicked somewhere else - reset state and allow normal behavior
-            this.clickState.lastClickTime = 0;
-            this.clickState.lastClickOffset = -1;
-            
-            if (this.clickState.timeoutId) {
-                GLib.source_remove(this.clickState.timeoutId);
-                this.clickState.timeoutId = null;
-            }
-        }
+        const r = this.markdownRenderer;
+        if (r && typeof r.renderNow === 'function')
+            r.renderNow();
+        return true;
     }
 };
-

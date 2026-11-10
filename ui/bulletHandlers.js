@@ -1,10 +1,28 @@
-const { Gtk, GLib } = imports.gi;
+const { Gtk } = imports.gi;
 const { Constants } = imports.constants;
 const { TextUtils } = imports.util.text;
+const { MarkdownList } = imports.util.markdownList;
 
 // ============================================================================
-// Bullet List Handlers Component
+// List / editing key handlers
 // ============================================================================
+//
+// Enter continues lists, Tab/Shift+Tab nest and un-nest list items (or change
+// header level), Ctrl+T toggles a task checkbox, Ctrl+X without a selection
+// cuts the whole line, Ctrl+Up/Down move lines.
+//
+// Rules:
+//  - every command is exactly one undo step (begin/end_user_action around all
+//    of its edits, including renumbering);
+//  - only the affected lines are read/edited (no full-buffer get_text);
+//  - nothing happens inside fenced code blocks.
+
+const KEY_TAB = 65289;
+const KEY_ISO_LEFT_TAB = 65056;
+const KEY_KP_TAB = 65417;
+const MOD_MASK = Constants.CTRL_MASK | Constants.SHIFT_MASK | Constants.ALT_MASK;
+
+const { parseListItem, sameListType, indentWidth, leadingWhitespace, parseHeader } = MarkdownList;
 
 var BulletHandlers = class BulletHandlers {
     constructor(textView, markdownRenderer, lineMovement) {
@@ -12,780 +30,491 @@ var BulletHandlers = class BulletHandlers {
         this.markdownRenderer = markdownRenderer;
         this.buffer = textView.get_buffer();
         this.lineMovement = lineMovement;
+        this._keyController = null;
     }
 
     setup() {
-        const keyController = new Gtk.EventControllerKey();
-        
-        keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
-            return this._handleKeyPress(keyval, keycode, state);
+        this._keyController = new Gtk.EventControllerKey();
+        this._keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
+            return this.handleKeyPress(keyval, state);
         });
-        
-        this.textView.add_controller(keyController);
+        this.textView.add_controller(this._keyController);
     }
 
-    _handleKeyPress(keyval, keycode, state) {
-        // Detect undo/redo operations (Ctrl+Z and Ctrl+Shift+Z)
-        if (keyval === 122 && (state & Constants.CTRL_MASK)) {
-            if (this.markdownRenderer) {
-                this.markdownRenderer._isUndoRedoOperation = true;
-            }
-            return false;
+    destroy() {
+        if (this._keyController) {
+            this.textView.remove_controller(this._keyController);
+            this._keyController = null;
         }
-        
-        // Get current position and line
-        const cursor = this.buffer.get_insert();
-        const iter = this.buffer.get_iter_at_mark(cursor);
-        const cursorOffset = iter.get_offset();
-        
-        const currentLineIter = iter.copy();
-        const currentLineNum = currentLineIter.get_line();
-        
-        const lineStart = currentLineIter.copy();
-        lineStart.set_line_offset(0);
-        const lineStartOffset = lineStart.get_offset();
-        
-        const lineEnd = currentLineIter.copy();
-        lineEnd.set_line_offset(0);
-        if (!lineEnd.ends_line()) {
-            lineEnd.forward_to_line_end();
-        }
-        const lineEndOffset = lineEnd.get_offset();
-        
-        const lineText = this.buffer.get_text(lineStart, lineEnd, false);
-        
-        const [start, end] = this.buffer.get_bounds();
-        const allText = this.buffer.get_text(start, end, false);
-        const lines = allText.split('\n');
-        
-        // Handle Ctrl+T: Toggle TODO checkbox on current line
-        if (keyval === Constants.KEY_T && (state & Constants.CTRL_MASK)) {
-            return this._handleToggleTodo(lineText, lineStartOffset, cursorOffset);
-        }
-        
-        // Handle Enter key
-        if ((keyval === Constants.KEY_ENTER || keyval === Constants.KEY_KP_ENTER) && !(state & Constants.CTRL_MASK)) {
-            return this._handleEnter(lineText, iter);
-        }
-        
-        // Handle Tab key
-        if (keyval === 65289 && !(state & Constants.CTRL_MASK)) {
-            return this._handleTab(lineText, lines, currentLineNum, lineStartOffset, lineEndOffset, iter);
-        }
-        
-        // Handle Shift+Tab key
-        if (keyval === 65056) {
-            return this._handleShiftTab(lineText, lines, currentLineNum, lineStartOffset, lineEndOffset, iter);
-        }
-        
-        // Handle Ctrl+X: Cut entire line if no text is selected
-        if (keyval === Constants.KEY_X && (state & Constants.CTRL_MASK)) {
-            return this._handleCutLine();
-        }
-        
-        // Handle Ctrl+Up: Move line up
-        if (keyval === Constants.KEY_UP && (state & Constants.CTRL_MASK) && this.lineMovement) {
+    }
+
+    // Returns true when the key was handled (the default action is suppressed).
+    handleKeyPress(keyval, state) {
+        const mods = state & MOD_MASK;
+        const ctrl = mods === Constants.CTRL_MASK;
+
+        if (ctrl && keyval === Constants.KEY_T)
+            return this.toggleTodo();
+
+        if ((keyval === Constants.KEY_ENTER || keyval === Constants.KEY_KP_ENTER) && mods === 0)
+            return this.handleEnter();
+
+        if ((keyval === KEY_TAB || keyval === KEY_KP_TAB) && mods === 0)
+            return this.indent();
+
+        if (keyval === KEY_ISO_LEFT_TAB ||
+            ((keyval === KEY_TAB || keyval === KEY_KP_TAB) && mods === Constants.SHIFT_MASK))
+            return (mods & ~Constants.SHIFT_MASK) === 0 ? this.outdent() : false;
+
+        if (ctrl && keyval === Constants.KEY_X)
+            return this.cutLine();
+
+        if (ctrl && keyval === Constants.KEY_UP && this.lineMovement) {
             this.lineMovement.moveLineUp();
             return true;
         }
-        
-        // Handle Ctrl+Down: Move line down
-        if (keyval === Constants.KEY_DOWN && (state & Constants.CTRL_MASK) && this.lineMovement) {
+        if (ctrl && keyval === Constants.KEY_DOWN && this.lineMovement) {
             this.lineMovement.moveLineDown();
             return true;
         }
-        
         return false;
     }
 
-    _handleToggleTodo(lineText, lineStartOffset, cursorOffset) {
-        
-        const todoMatch = lineText.match(/\[([ Xx])\]/);
-        if (todoMatch) {
-            const isChecked = todoMatch[1] === 'X' || todoMatch[1] === 'x';
-            const todoStart = lineStartOffset + TextUtils.charLength(lineText.slice(0, todoMatch.index));
-            const todoEnd = todoStart + 3;
-            
-            
-            const savedCursorOffset = cursorOffset;
-            
-            this.buffer.begin_user_action();
-            
-            const startIter = this.buffer.get_iter_at_offset(todoStart);
-            const endIter = this.buffer.get_iter_at_offset(todoEnd);
-            this.buffer.delete(startIter, endIter);
-            
-            const newStartIter = this.buffer.get_iter_at_offset(todoStart);
-            const newTodo = isChecked ? '[ ]' : '[X]';
-            this.buffer.insert(newStartIter, newTodo, -1);
-            
-            this.buffer.end_user_action();
-            
-            const restoredIter = this.buffer.get_iter_at_offset(savedCursorOffset);
-            this.buffer.place_cursor(restoredIter);
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        return false;
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    _isCodeLine(line) {
+        const r = this.markdownRenderer;
+        return !!(r && typeof r.isInCodeBlock === 'function' && r.isInCodeBlock(line));
     }
 
-    _handleEnter(lineText, iter) {
-        
-        // Check for numbered list first (e.g., "1. item" or "  1. item")
-        const numberedMatch = lineText.match(/^(\s*)(\d+)\.\s+(.*)$/);
-        if (numberedMatch) {
-            return this._handleNumberedListEnter(lineText, iter, numberedMatch);
+    _isCodeSpan(iter) {
+        const r = this.markdownRenderer;
+        return !!(r && typeof r.isInCodeSpan === 'function' && r.isInCodeSpan(iter));
+    }
+
+    _render() {
+        const r = this.markdownRenderer;
+        if (r && typeof r.renderNow === 'function')
+            r.renderNow();
+    }
+
+    _cursorIter() {
+        return this.buffer.get_iter_at_mark(this.buffer.get_insert());
+    }
+
+    _lineCount() {
+        return this.buffer.get_line_count();
+    }
+
+    _lineText(line) {
+        return TextUtils.lineText(this.buffer, line);
+    }
+
+    // Iterator at UTF-16 index `index` of line `line` whose text is `text`.
+    _iterAt(line, text, index) {
+        return TextUtils.iterAtLineOffset(this.buffer, line, TextUtils.offsetAt(text, index));
+    }
+
+    // Replace [startIdx, endIdx) (UTF-16 indices into `text`, the current text
+    // of `line`) with `replacement`. Must be called inside a user action.
+    _replaceInLine(line, text, startIdx, endIdx, replacement) {
+        if (endIdx > startIdx) {
+            const s = this._iterAt(line, text, startIdx);
+            const e = this._iterAt(line, text, endIdx);
+            this.buffer.delete(s, e);
         }
-        
-        // Check for regular bullet list
-        const bulletMatch = lineText.match(/^(\s*)([-*])\s+(.*)$/);
-        if (bulletMatch) {
-            const [, indent, bullet, content] = bulletMatch;
-            
-            const cursorLineOffset = iter.get_line_offset();
-            const lineLength = TextUtils.charLength(lineText);
-            const isCursorAtEnd = cursorLineOffset === lineLength;
-            
-            if (!isCursorAtEnd) {
-                return false;
-            }
-            
-            const hasTodo = content.match(/^\[([ Xx])\]\s*/);
-            
-            if (!content.trim() || (hasTodo && !content.slice(hasTodo[0].length).trim())) {
-                
-                this.buffer.begin_user_action();
-                
-                const cursorIter = this.buffer.get_iter_at_mark(this.buffer.get_insert());
-                const lineStart = cursorIter.copy();
-                lineStart.set_line_offset(0);
-                const lineEnd = cursorIter.copy();
-                lineEnd.set_line_offset(0);
-                if (!lineEnd.ends_line()) {
-                    lineEnd.forward_to_line_end();
-                }
-                
-                this.buffer.delete(lineStart, lineEnd);
-                
-                this.buffer.end_user_action();
-                
-                if (this.markdownRenderer) {
-                    this.markdownRenderer._updateSyntaxVisibility();
-                }
-                
+        if (replacement.length > 0) {
+            const at = this._iterAt(line, text, startIdx);
+            this.buffer.insert(at, replacement, -1);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // List structure
+    // ------------------------------------------------------------------
+
+    // Contiguous region of lines that can belong to the list block around
+    // [fromLine, toLine]: list items, blank lines and indented lines.
+    _listBlockRange(fromLine, toLine) {
+        const isPart = (l) => {
+            const t = this._lineText(l);
+            if (t.trim() === '')
                 return true;
-            }
-            
-            let newBullet;
-            if (hasTodo) {
-                newBullet = `\n${indent}${bullet} [ ] `;
-            } else {
-                newBullet = `\n${indent}${bullet} `;
-            }
-            this.buffer.insert_at_cursor(newBullet, -1);
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        return false;
+            if (this._isCodeLine(l))
+                return /^[ \t]/.test(t);
+            return /^[ \t]/.test(t) || parseListItem(t) !== null;
+        };
+        let a = fromLine;
+        while (a > 0 && isPart(a - 1))
+            a--;
+        let b = toLine;
+        const last = this._lineCount() - 1;
+        while (b < last && isPart(b + 1))
+            b++;
+        return [a, b];
     }
 
-    _handleNumberedListEnter(lineText, iter, numberedMatch) {
-        const [, indent, number, content] = numberedMatch;
-        
-        const cursorLineOffset = iter.get_line_offset();
-        const lineLength = TextUtils.charLength(lineText);
-        const isCursorAtEnd = cursorLineOffset === lineLength;
-        
-        if (!isCursorAtEnd) {
-            // When inserting in middle, add new item and renumber
-            this.buffer.begin_user_action();
-            
-            const cursorIter = this.buffer.get_iter_at_mark(this.buffer.get_insert());
-            const currentLineNum = cursorIter.get_line();
-            
-            // Split the current line at cursor position
-            const cursorIndex = TextUtils.indexAt(lineText, cursorLineOffset);
-            const beforeCursor = lineText.substring(0, cursorIndex);
-            const afterCursor = lineText.substring(cursorIndex);
-            
-            // Get next number
-            const nextNum = parseInt(number) + 1;
-            const newLine = `\n${indent}${nextNum}. ${afterCursor}`;
-            
-            this.buffer.insert_at_cursor(newLine, -1);
-            
-            this.buffer.end_user_action();
-            
-            // Renumber all subsequent items
-            this._renumberListFrom(currentLineNum + 1, nextNum);
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        
-        const hasTodo = content.match(/^\[([ Xx])\]\s*/);
-        
-        if (!content.trim() || (hasTodo && !content.slice(hasTodo[0].length).trim())) {
-            
-            this.buffer.begin_user_action();
-            
-            const cursorIter = this.buffer.get_iter_at_mark(this.buffer.get_insert());
-            const lineStart = cursorIter.copy();
-            lineStart.set_line_offset(0);
-            const lineEnd = cursorIter.copy();
-            lineEnd.set_line_offset(0);
-            if (!lineEnd.ends_line()) {
-                lineEnd.forward_to_line_end();
-            }
-            
-            this.buffer.delete(lineStart, lineEnd);
-            
-            this.buffer.end_user_action();
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        
-        const cursorIter = this.buffer.get_iter_at_mark(this.buffer.get_insert());
-        const currentLineNum = cursorIter.get_line();
-        const nextNum = parseInt(number) + 1;
-        let newItem;
-        if (hasTodo) {
-            newItem = `\n${indent}${nextNum}. [ ] `;
-        } else {
-            newItem = `\n${indent}${nextNum}. `;
-        }
-        
-        this.buffer.begin_user_action();
-        this.buffer.insert_at_cursor(newItem, -1);
-        this.buffer.end_user_action();
-        
-        // Renumber all subsequent items starting from the newly inserted line
-        this._renumberListFrom(currentLineNum + 1, nextNum);
-        
-        if (this.markdownRenderer) {
-            this.markdownRenderer._updateSyntaxVisibility();
-        }
-        
-        return true;
-    }
-
-    _renumberListFrom(startLineNum, startNumber) {
-        // Get all text to analyze the list
-        const [start, end] = this.buffer.get_bounds();
-        const allText = this.buffer.get_text(start, end, false);
-        const lines = allText.split('\n');
-        
-        if (startLineNum >= lines.length) {
-            return;
-        }
-        
-        // Get the indent level of the starting line
-        const startLine = lines[startLineNum];
-        const startMatch = startLine.match(/^(\s*)(\d+)\.\s+(.*)$/);
-        if (!startMatch) {
-            return;
-        }
-        const baseIndent = startMatch[1];
-        
-        let currentNumber = startNumber;
-        let lineOffset = 0;
-        
-        // Calculate offset to startLineNum
-        for (let i = 0; i < startLineNum; i++) {
-            lineOffset += TextUtils.charLength(lines[i]) + 1; // +1 for newline
-        }
-        
-        this.buffer.begin_user_action();
-        
-        for (let i = startLineNum; i < lines.length; i++) {
-            const line = lines[i];
-            const match = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
-            
-            if (!match) {
-                // Not a numbered list item, stop renumbering
-                break;
-            }
-            
-            const [, indent, oldNum, content] = match;
-            
-            // If indent level changed, stop renumbering
-            if (indent.length !== baseIndent.length) {
-                break;
-            }
-            
-            // If the number is already correct, we can stop
-            if (parseInt(oldNum) === currentNumber) {
-                currentNumber++;
-                lineOffset += TextUtils.charLength(line) + 1;
+    // Build the lists in [a, b]. Each list: { items: [{line, item}], parent }.
+    _scanLists(a, b) {
+        const lists = [];
+        const stack = [];
+        for (let l = a; l <= b; l++) {
+            const text = this._lineText(l);
+            if (text.trim() === '')
                 continue;
+            const item = this._isCodeLine(l) ? null : parseListItem(text);
+            if (item) {
+                const w = item.indentWidth;
+                while (stack.length && w < stack[stack.length - 1].indentWidth)
+                    stack.pop();
+                let top = stack[stack.length - 1];
+                if (top && w < top.contentColumn) {
+                    if (sameListType(top.items[0].item, item)) {
+                        top.items.push({ line: l, item });
+                        top.contentColumn = item.contentColumn;
+                        continue;
+                    }
+                    stack.pop();
+                    top = stack[stack.length - 1];
+                }
+                const parent = top ? top.items[top.items.length - 1] : null;
+                const list = {
+                    indentWidth: w,
+                    contentColumn: item.contentColumn,
+                    items: [{ line: l, item }],
+                    parent,
+                };
+                lists.push(list);
+                stack.push(list);
+            } else {
+                const iw = indentWidth(leadingWhitespace(text));
+                while (stack.length && iw < stack[stack.length - 1].contentColumn)
+                    stack.pop();
             }
-            
-            // Replace the number
-            const newLine = `${indent}${currentNumber}. ${content}`;
-            
-            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
-            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + TextUtils.charLength(line));
-            
-            this.buffer.delete(lineStart, lineEnd);
-            
-            const insertIter = this.buffer.get_iter_at_offset(lineOffset);
-            this.buffer.insert(insertIter, newLine, -1);
-            
-            lineOffset += TextUtils.charLength(newLine) + 1;
-            currentNumber++;
         }
-        
-        this.buffer.end_user_action();
+        return lists;
     }
 
-    _handleTab(lineText, lines, currentLineNum, lineStartOffset, lineEndOffset, iter) {
-        
-        // Check if we're on a header line first
-        const headerMatch = lineText.match(/^(#{1,})(\s+)(.+)$/);
-        if (headerMatch) {
-            return this._indentHeader(headerMatch, iter, lineStartOffset);
+    _listOfLine(lists, line) {
+        for (const list of lists) {
+            const idx = list.items.findIndex(it => it.line === line);
+            if (idx >= 0)
+                return [list, idx];
         }
-        
-        // Check if there's a selection
-        const [hasSelection, selStart, selEnd] = this.buffer.get_selection_bounds();
-        
-        if (hasSelection) {
-            return this._indentMultipleLines(lines, selStart, selEnd);
-        } else {
-            return this._indentSingleLine(lineText, lineStartOffset, lineEndOffset, currentLineNum);
+        return [null, -1];
+    }
+
+    // Renumber the ordered lists (in the block around [from, to]) that contain
+    // any line of `lines`. `moved` lines starting a list restart it at 1;
+    // `fresh` lines are ignored when detecting lazy "1. 1. 1." numbering.
+    _renumber(from, to, lines, moved = new Set(), fresh = new Set()) {
+        const [a, b] = this._listBlockRange(from, to);
+        const lists = this._scanLists(a, b);
+        for (const list of lists) {
+            if (!list.items[0].item.ordered)
+                continue;
+            if (!list.items.some(it => lines.has(it.line)))
+                continue;
+
+            const first = list.items[0];
+            const start = moved.has(first.line) ? 1 : first.item.number;
+            const others = list.items.filter(it => !fresh.has(it.line) && !moved.has(it.line));
+            const lazy = others.length >= 2 &&
+                others.every(it => it.item.number === others[0].item.number);
+
+            list.items.forEach((it, idx) => {
+                const expected = lazy ? others[0].item.number : start + idx;
+                if (it.item.number === expected)
+                    return;
+                const text = this._lineText(it.line);
+                const item = parseListItem(text);
+                if (!item || !item.ordered)
+                    return;
+                this._replaceInLine(it.line, text, item.markerStart,
+                    item.markerStart + item.digits.length, String(expected));
+            });
         }
     }
 
-    _indentHeader(headerMatch, iter, lineStartOffset) {
-        const [, hashes, spaces, content] = headerMatch;
-        const newLine = `#${hashes}${spaces}${content}`;
-        
+    // ------------------------------------------------------------------
+    // Enter
+    // ------------------------------------------------------------------
+
+    handleEnter() {
+        if (this.buffer.get_has_selection())
+            return false;
+        const iter = this._cursorIter();
+        const line = iter.get_line();
+        if (this._isCodeLine(line))
+            return false;
+        const text = this._lineText(line);
+        const item = parseListItem(text);
+        if (!item || item.spacing.length === 0)
+            return false;
+
+        const cursorIdx = TextUtils.indexAt(text, iter.get_line_offset());
+        if (cursorIdx < item.contentStart)
+            return false;
+
         this.buffer.begin_user_action();
-        
-        const cursorLineOffset = iter.get_line_offset();
-        const lineStart = iter.copy();
-        lineStart.set_line_offset(0);
-        const lineEnd = iter.copy();
-        lineEnd.set_line_offset(0);
-        if (!lineEnd.ends_line()) {
-            lineEnd.forward_to_line_end();
+        try {
+            if (item.content.trim() === '') {
+                // Empty item: leave the list (clear the marker).
+                this._replaceInLine(line, text, 0, text.length, '');
+            } else {
+                const after = text.slice(cursorIdx);
+                const leadingAfter = after.length - after.replace(/^[ \t]+/, '').length;
+                const before = text.slice(item.contentStart, cursorIdx);
+                const trailingBefore = before.length - before.replace(/[ \t]+$/, '').length;
+
+                const marker = item.ordered ? `${item.number + 1}${item.delimiter}` : item.bullet;
+                const spacing = item.spacing.includes('\t') ? item.spacing : ' ';
+                const prefix = item.indent + marker + spacing + (item.checkbox ? '[ ] ' : '');
+
+                const delStart = cursorIdx - trailingBefore;
+                const delEnd = cursorIdx + leadingAfter;
+                this._replaceInLine(line, text, delStart, delEnd, '\n' + prefix);
+
+                const newCursor = TextUtils.iterAtLineOffset(this.buffer, line + 1,
+                    TextUtils.charLength(prefix));
+                this.buffer.place_cursor(newCursor);
+
+                if (item.ordered) {
+                    const fresh = new Set([line + 1]);
+                    this._renumber(line, line + 1, fresh, new Set(), fresh);
+                }
+            }
+        } finally {
+            this.buffer.end_user_action();
         }
-        
-        this.buffer.delete(lineStart, lineEnd);
-        const insertIter = this.buffer.get_iter_at_offset(lineStartOffset);
-        this.buffer.insert(insertIter, newLine, -1);
-        
-        const newCursorIter = this.buffer.get_iter_at_offset(lineStartOffset + cursorLineOffset + 1);
-        this.buffer.place_cursor(newCursorIter);
-        this.buffer.end_user_action();
-        
-        if (this.markdownRenderer) {
-            this.markdownRenderer._updateSyntaxVisibility();
-        }
-        
+        this._render();
+        this.textView.scroll_mark_onscreen(this.buffer.get_insert());
         return true;
     }
 
-    _indentMultipleLines(lines, selStart, selEnd) {
-        const selStartOffset = selStart.get_offset();
-        const selEndOffset = selEnd.get_offset();
-        
-        let offset = 0;
-        let firstLineNum = -1;
-        let lastLineNum = -1;
-        
-        for (let i = 0; i < lines.length; i++) {
-            const lineLength = TextUtils.charLength(lines[i]);
-            const lineEndOffset = offset + lineLength;
-            
-            if (selStartOffset < lineEndOffset && selEndOffset > offset) {
-                if (firstLineNum === -1) firstLineNum = i;
-                lastLineNum = i;
-            }
-            
-            offset += lineLength + 1;
+    // ------------------------------------------------------------------
+    // Tab / Shift+Tab
+    // ------------------------------------------------------------------
+
+    // Lines [first, last] touched by the selection (or the cursor line).
+    _targetLines() {
+        const [hasSel, s, e] = this.buffer.get_selection_bounds();
+        if (!hasSel) {
+            const l = this._cursorIter().get_line();
+            return [l, l, false];
         }
-        
-        if (firstLineNum !== -1 && lastLineNum !== -1) {
-            let anyListItems = false;
-            for (let i = firstLineNum; i <= lastLineNum; i++) {
-                if (lines[i].match(/^(\s*)([-*])(\s*.*)$/) || lines[i].match(/^(\s*)(\d+)\.(\s*.*)$/)) {
-                    anyListItems = true;
-                    break;
-                }
-            }
-            
-            if (anyListItems) {
-                
-                let selStartLineNum = -1;
-                let lineOffset = 0;
-                for (let i = 0; i < lines.length; i++) {
-                    const lineEnd = lineOffset + TextUtils.charLength(lines[i]);
-                    if (selStartOffset >= lineOffset && selStartOffset <= lineEnd) {
-                        selStartLineNum = i;
-                        break;
-                    }
-                    lineOffset += TextUtils.charLength(lines[i]) + 1;
-                }
-                
-                const newLines = [];
-                let spacesAddedAtOrBeforeSelStart = 0;
-                let totalSpacesAdded = 0;
-                
-                for (let i = 0; i < lines.length; i++) {
-                    if (i >= firstLineNum && i <= lastLineNum) {
-                        // Check for numbered list
-                        const numberedMatch = lines[i].match(/^(\s*)(\d+)\.(\s*.*)$/);
-                        if (numberedMatch) {
-                            const [, indent, number, rest] = numberedMatch;
-                            newLines.push(`   ${indent}${number}.${rest}`);  // 3 spaces for numbered lists
-                            
-                            if (i <= selStartLineNum) {
-                                spacesAddedAtOrBeforeSelStart += 3;
-                            }
-                            totalSpacesAdded += 3;
-                        } else {
-                            // Check for bullet list
-                            const bulletMatch = lines[i].match(/^(\s*)([-*])(\s*.*)$/);
-                            if (bulletMatch) {
-                                const [, indent, bullet, rest] = bulletMatch;
-                                newLines.push(` ${indent}${bullet}${rest}`);
-                                
-                                if (i <= selStartLineNum) {
-                                    spacesAddedAtOrBeforeSelStart += 1;
-                                }
-                                totalSpacesAdded += 1;
-                            } else {
-                                newLines.push(lines[i]);
-                            }
-                        }
-                    } else {
-                        newLines.push(lines[i]);
-                    }
-                }
-                
-                this.buffer.begin_user_action();
-                const [bufStart, bufEnd] = this.buffer.get_bounds();
-                this.buffer.delete(bufStart, bufEnd);
-                this.buffer.insert(bufStart, newLines.join('\n'), -1);
-                
-                const newSelStart = this.buffer.get_iter_at_offset(selStartOffset + spacesAddedAtOrBeforeSelStart);
-                const newSelEnd = this.buffer.get_iter_at_offset(selEndOffset + totalSpacesAdded);
-                this.buffer.select_range(newSelStart, newSelEnd);
-                this.buffer.end_user_action();
-                
-                this.textView.scroll_to_mark(this.buffer.get_insert(), 0.0, false, 0.0, 0.0);
-                
-                if (this.markdownRenderer) {
-                    this.markdownRenderer._updateSyntaxVisibility();
-                }
-                
-                return true;
-            }
-        }
-        return false;
+        let last = e.get_line();
+        if (e.get_line_offset() === 0 && last > s.get_line())
+            last--;
+        return [s.get_line(), last, true];
     }
 
-    _indentSingleLine(lineText, lineStartOffset, lineEndOffset, currentLineNum) {
-        // Check for numbered list first
-        const numberedMatch = lineText.match(/^(\s*)(\d+)\.(\s*.*)$/);
-        if (numberedMatch) {
-            const [, indent, number, rest] = numberedMatch;
-            const newLine = `   ${indent}${number}.${rest}`;  // 3 spaces for numbered lists
-            
-            this.buffer.begin_user_action();
-            
-            const deleteStart = this.buffer.get_iter_at_offset(lineStartOffset);
-            const deleteEnd = this.buffer.get_iter_at_offset(lineEndOffset);
-            
-            this.buffer.delete(deleteStart, deleteEnd);
-            this.buffer.insert(deleteStart, newLine, -1);
-            
-            this.buffer.end_user_action();
-            
-            // Renumber the list starting from 1 at the new indent level
-            this._renumberListFrom(currentLineNum, 1);
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        
-        // Check for bullet list
-        const bulletMatch = lineText.match(/^(\s*)([-*])(\s*.*)$/);
-        if (bulletMatch) {
-            const [, indent, bullet, rest] = bulletMatch;
-            const newLine = ` ${indent}${bullet}${rest}`;
-            
-            this.buffer.begin_user_action();
-            
-            const deleteStart = this.buffer.get_iter_at_offset(lineStartOffset);
-            const deleteEnd = this.buffer.get_iter_at_offset(lineEndOffset);
-            
-            this.buffer.delete(deleteStart, deleteEnd);
-            this.buffer.insert(deleteStart, newLine, -1);
-            
-            this.buffer.end_user_action();
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        return false;
+    indent() {
+        return this._shiftLines(+1);
     }
 
-    _handleShiftTab(lineText, lines, currentLineNum, lineStartOffset, lineEndOffset, iter) {
-        
-        // Check if we're on a header line first
-        const headerMatch = lineText.match(/^(#{2,})(\s+)(.+)$/);
-        if (headerMatch) {
-            return this._outdentHeader(headerMatch, iter, lineStartOffset);
-        }
-        
-        // Check if there's a selection
-        const [hasSelection, selStart, selEnd] = this.buffer.get_selection_bounds();
-        
-        if (hasSelection) {
-            return this._outdentMultipleLines(lines, selStart, selEnd);
-        } else {
-            return this._outdentSingleLine(lineText, lineStartOffset, lineEndOffset, currentLineNum);
-        }
+    outdent() {
+        return this._shiftLines(-1);
     }
 
-    _outdentHeader(headerMatch, iter, lineStartOffset) {
-        const [, hashes, spaces, content] = headerMatch;
-        const newLine = `${hashes.substring(1)}${spaces}${content}`;
-        
+    _shiftLines(direction) {
+        const [first, last, hasSel] = this._targetLines();
+
+        // Single line header: Tab adds a '#', Shift+Tab removes one.
+        if (!hasSel && !this._isCodeLine(first)) {
+            const text = this._lineText(first);
+            const header = parseHeader(text);
+            if (header && parseListItem(text) === null)
+                return this._shiftHeader(first, text, header, direction);
+        }
+
+        // Collect list items in the range (outside code blocks).
+        const targets = [];
+        for (let l = first; l <= last; l++) {
+            if (this._isCodeLine(l))
+                continue;
+            const item = parseListItem(this._lineText(l));
+            if (item)
+                targets.push({ line: l, item });
+        }
+        if (targets.length === 0)
+            return false; // default Tab behaviour on non-list lines
+
+        // Compute the new indentation of every item from the structure before
+        // the edit, so a block moves consistently.
+        const [a, b] = this._listBlockRange(first, last);
+        const before = this._scanLists(a, b);
+        const sourceLines = new Set();
+        for (const t of targets) {
+            const [list, idx] = this._listOfLine(before, t.line);
+            const w = t.item.indentWidth;
+            if (direction > 0) {
+                t.target = list && idx > 0
+                    ? list.items[idx - 1].item.contentColumn
+                    : t.item.contentColumn;
+            } else {
+                t.target = list && list.parent ? list.parent.item.indentWidth : 0;
+                if (t.target > w)
+                    t.target = 0;
+            }
+            if (list)
+                list.items.forEach(it => sourceLines.add(it.line));
+        }
+        if (direction < 0 && targets.every(t => t.item.indentWidth === 0))
+            return true; // nothing to outdent; swallow so focus doesn't move
+
+        const marks = this._saveSelection();
+        const deltas = new Map();
+
         this.buffer.begin_user_action();
-        
-        const cursorLineOffset = iter.get_line_offset();
-        const lineStart = iter.copy();
-        lineStart.set_line_offset(0);
-        const lineEnd = iter.copy();
-        lineEnd.set_line_offset(0);
-        if (!lineEnd.ends_line()) {
-            lineEnd.forward_to_line_end();
+        try {
+            for (const t of targets) {
+                const text = this._lineText(t.line);
+                const oldLen = t.item.indent.length;
+                const newIndent = ' '.repeat(t.target);
+                if (newIndent === t.item.indent)
+                    continue;
+                if (/^ *$/.test(t.item.indent) && t.target > oldLen)
+                    this._replaceInLine(t.line, text, 0, 0, ' '.repeat(t.target - oldLen));
+                else if (/^ *$/.test(t.item.indent))
+                    this._replaceInLine(t.line, text, t.target, oldLen, '');
+                else
+                    this._replaceInLine(t.line, text, 0, oldLen, newIndent);
+                deltas.set(t.line, { oldLen, newLen: t.target });
+            }
+
+            const moved = new Set(targets.map(t => t.line));
+            const all = new Set([...moved, ...sourceLines]);
+            this._renumber(first, last, all, moved);
+            this._restoreSelection(marks, deltas);
+        } finally {
+            this.buffer.end_user_action();
         }
-        
-        this.buffer.delete(lineStart, lineEnd);
-        const insertIter = this.buffer.get_iter_at_offset(lineStartOffset);
-        this.buffer.insert(insertIter, newLine, -1);
-        
-        const newCursorIter = this.buffer.get_iter_at_offset(lineStartOffset + Math.max(0, cursorLineOffset - 1));
-        this.buffer.place_cursor(newCursorIter);
-        this.buffer.end_user_action();
-        
-        if (this.markdownRenderer) {
-            this.markdownRenderer._updateSyntaxVisibility();
-        }
-        
+        this._render();
+        this.textView.scroll_mark_onscreen(this.buffer.get_insert());
         return true;
     }
 
-    _outdentMultipleLines(lines, selStart, selEnd) {
-        const selStartOffset = selStart.get_offset();
-        const selEndOffset = selEnd.get_offset();
-        
-        let offset = 0;
-        let firstLineNum = -1;
-        let lastLineNum = -1;
-        
-        for (let i = 0; i < lines.length; i++) {
-            const lineLength = TextUtils.charLength(lines[i]);
-            const lineEndOffset = offset + lineLength;
-            
-            if (selStartOffset < lineEndOffset && selEndOffset > offset) {
-                if (firstLineNum === -1) firstLineNum = i;
-                lastLineNum = i;
-            }
-            
-            offset += lineLength + 1;
+    _shiftHeader(line, text, header, direction) {
+        if (direction > 0 && header.hashes.length >= 6)
+            return true;
+        if (direction < 0 && header.hashes.length <= 1)
+            return true;
+        const cursor = this._cursorIter().get_line_offset();
+        this.buffer.begin_user_action();
+        try {
+            if (direction > 0)
+                this._replaceInLine(line, text, 0, 0, '#');
+            else
+                this._replaceInLine(line, text, 0, 1, '');
+            const col = Math.max(0, cursor + direction);
+            this.buffer.place_cursor(TextUtils.iterAtLineOffset(this.buffer, line, col));
+        } finally {
+            this.buffer.end_user_action();
         }
-        
-        if (firstLineNum !== -1 && lastLineNum !== -1) {
-            let anyIndentedItems = false;
-            for (let i = firstLineNum; i <= lastLineNum; i++) {
-                if (lines[i].match(/^(\s+)([-*])(\s*.*)$/) || lines[i].match(/^(\s+)(\d+)\.(\s*.*)$/)) {
-                    anyIndentedItems = true;
-                    break;
-                }
-            }
-            
-            if (anyIndentedItems) {
-                
-                let selStartLineNum = -1;
-                let lineOffset = 0;
-                for (let i = 0; i < lines.length; i++) {
-                    const lineEnd = lineOffset + TextUtils.charLength(lines[i]);
-                    if (selStartOffset >= lineOffset && selStartOffset <= lineEnd) {
-                        selStartLineNum = i;
-                        break;
-                    }
-                    lineOffset += TextUtils.charLength(lines[i]) + 1;
-                }
-                
-                const newLines = [];
-                let spacesRemovedAtOrBeforeSelStart = 0;
-                let totalSpacesRemoved = 0;
-                
-                for (let i = 0; i < lines.length; i++) {
-                    if (i >= firstLineNum && i <= lastLineNum) {
-                        // Check for numbered list
-                        const numberedMatch = lines[i].match(/^(\s+)(\d+)\.(\s*.*)$/);
-                        if (numberedMatch) {
-                            const [, indent, number, rest] = numberedMatch;
-                            const spacesRemoved = Math.min(3, indent.length);  // Remove 3 spaces for numbered lists
-                            const newIndent = indent.substring(spacesRemoved);
-                            newLines.push(`${newIndent}${number}.${rest}`);
-                            
-                            if (i <= selStartLineNum) {
-                                spacesRemovedAtOrBeforeSelStart += spacesRemoved;
-                            }
-                            totalSpacesRemoved += spacesRemoved;
-                        } else {
-                            // Check for bullet list
-                            const bulletMatch = lines[i].match(/^(\s+)([-*])(\s*.*)$/);
-                            if (bulletMatch) {
-                                const [, indent, bullet, rest] = bulletMatch;
-                                const spacesRemoved = Math.min(1, indent.length);
-                                const newIndent = indent.substring(spacesRemoved);
-                                newLines.push(`${newIndent}${bullet}${rest}`);
-                                
-                                if (i <= selStartLineNum) {
-                                    spacesRemovedAtOrBeforeSelStart += spacesRemoved;
-                                }
-                                totalSpacesRemoved += spacesRemoved;
-                            } else {
-                                newLines.push(lines[i]);
-                            }
-                        }
-                    } else {
-                        newLines.push(lines[i]);
-                    }
-                }
-                
-                this.buffer.begin_user_action();
-                const [bufStart, bufEnd] = this.buffer.get_bounds();
-                this.buffer.delete(bufStart, bufEnd);
-                this.buffer.insert(bufStart, newLines.join('\n'), -1);
-                
-                const newSelStart = this.buffer.get_iter_at_offset(Math.max(0, selStartOffset - spacesRemovedAtOrBeforeSelStart));
-                const newSelEnd = this.buffer.get_iter_at_offset(Math.max(0, selEndOffset - totalSpacesRemoved));
-                this.buffer.select_range(newSelStart, newSelEnd);
-                this.buffer.end_user_action();
-                
-                this.textView.scroll_to_mark(this.buffer.get_insert(), 0.0, false, 0.0, 0.0);
-                
-                if (this.markdownRenderer) {
-                    this.markdownRenderer._updateSyntaxVisibility();
-                }
-                
-                return true;
-            }
-        }
-        return false;
+        this._render();
+        return true;
     }
 
-    _outdentSingleLine(lineText, lineStartOffset, lineEndOffset, currentLineNum) {
-        // Check for numbered list first
-        const numberedMatch = lineText.match(/^(\s+)(\d+)\.(\s*.*)$/);
-        if (numberedMatch) {
-            const [, indent, number, rest] = numberedMatch;
-            const newIndent = indent.length >= 3 ? indent.substring(3) : '';  // Remove 3 spaces for numbered lists
-            const newLine = `${newIndent}${number}.${rest}`;
-            
-            this.buffer.begin_user_action();
-            
-            const deleteStart = this.buffer.get_iter_at_offset(lineStartOffset);
-            const deleteEnd = this.buffer.get_iter_at_offset(lineEndOffset);
-            
-            this.buffer.delete(deleteStart, deleteEnd);
-            this.buffer.insert(deleteStart, newLine, -1);
-            
-            this.buffer.end_user_action();
-            
-            // Renumber the list starting from 1 at the new indent level
-            this._renumberListFrom(currentLineNum, 1);
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        
-        // Check for bullet list
-        const bulletMatch = lineText.match(/^(\s+)([-*])(\s*.*)$/);
-        if (bulletMatch) {
-            const [, indent, bullet, rest] = bulletMatch;
-            const newIndent = indent.length >= 1 ? indent.substring(1) : '';
-            const newLine = `${newIndent}${bullet}${rest}`;
-            
-            this.buffer.begin_user_action();
-            
-            const deleteStart = this.buffer.get_iter_at_offset(lineStartOffset);
-            const deleteEnd = this.buffer.get_iter_at_offset(lineEndOffset);
-            
-            this.buffer.delete(deleteStart, deleteEnd);
-            this.buffer.insert(deleteStart, newLine, -1);
-            
-            this.buffer.end_user_action();
-            
-            if (this.markdownRenderer) {
-                this.markdownRenderer._updateSyntaxVisibility();
-            }
-            
-            return true;
-        }
-        return false;
+    _saveSelection() {
+        const ins = this.buffer.get_iter_at_mark(this.buffer.get_insert());
+        const bound = this.buffer.get_iter_at_mark(this.buffer.get_selection_bound());
+        return [
+            { line: ins.get_line(), col: ins.get_line_offset() },
+            { line: bound.get_line(), col: bound.get_line_offset() },
+        ];
     }
 
-    _handleCutLine() {
-        const [hasSelection, selStart, selEnd] = this.buffer.get_selection_bounds();
-        
-        if (!hasSelection) {
-            const cursor = this.buffer.get_insert();
-            const iter = this.buffer.get_iter_at_mark(cursor);
-            
-            const lineStart = iter.copy();
-            lineStart.set_line_offset(0);
-            
-            const lineEnd = iter.copy();
-            if (!lineEnd.ends_line()) {
-                lineEnd.forward_to_line_end();
+    _restoreSelection(marks, deltas) {
+        const iters = marks.map(({ line, col }) => {
+            const d = deltas.get(line);
+            let newCol = col;
+            if (d && col > 0) {
+                if (col >= d.oldLen)
+                    newCol = col + d.newLen - d.oldLen;
+                else
+                    newCol = Math.min(col, d.newLen);
             }
-            if (!lineEnd.is_end()) {
-                lineEnd.forward_char();
-            }
-            
-            const clipboard = this.textView.get_clipboard();
-            const lineText = this.buffer.get_text(lineStart, lineEnd, false);
-            clipboard.set(lineText);
-            
-            this.buffer.delete(lineStart, lineEnd);
-            
-            return true;
+            return TextUtils.iterAtLineOffset(this.buffer, line, newCol);
+        });
+        this.buffer.select_range(iters[0], iters[1]);
+    }
+
+    // ------------------------------------------------------------------
+    // Ctrl+T: toggle the task checkbox of the cursor line
+    // ------------------------------------------------------------------
+
+    toggleTodo() {
+        const line = this._cursorIter().get_line();
+        return this.toggleTodoOnLine(line);
+    }
+
+    // Toggle the checkbox of the task item on `line`. Returns false when the
+    // line is not a task list item (or is inside code).
+    toggleTodoOnLine(line) {
+        if (this._isCodeLine(line))
+            return false;
+        const text = this._lineText(line);
+        const item = parseListItem(text);
+        if (!item || !item.checkbox)
+            return false;
+        const charIdx = item.checkbox.index + 1;
+        if (this._isCodeSpan(this._iterAt(line, text, item.checkbox.index)))
+            return false;
+
+        const marks = this._saveSelection();
+        this.buffer.begin_user_action();
+        try {
+            this._replaceInLine(line, text, charIdx, charIdx + 1, item.checkbox.checked ? ' ' : 'X');
+            this._restoreSelection(marks, new Map());
+        } finally {
+            this.buffer.end_user_action();
         }
-        return false;
+        this._render();
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Ctrl+X without selection: cut the whole line
+    // ------------------------------------------------------------------
+
+    cutLine() {
+        if (this.buffer.get_has_selection())
+            return false; // default cut of the selection
+
+        const line = this._cursorIter().get_line();
+        const [lineStart, lineEnd] = TextUtils.lineBounds(this.buffer, line);
+        const text = this.buffer.get_text(lineStart, lineEnd, true);
+        const isLast = line === this._lineCount() - 1;
+        if (isLast && line === 0 && text.length === 0)
+            return true; // empty buffer: nothing to cut
+
+        let delStart = lineStart;
+        let delEnd = lineEnd.copy();
+        if (!isLast) {
+            delEnd.forward_line(); // include the line terminator
+        } else if (line > 0) {
+            // Last line without trailing newline: remove the preceding newline
+            // so no empty line is left behind.
+            delStart = lineStart.copy();
+            delStart.backward_char();
+        }
+
+        this.textView.get_clipboard().set(text + '\n');
+
+        this.buffer.begin_user_action();
+        try {
+            this.buffer.delete(delStart, delEnd);
+            if (isLast && line > 0) {
+                const it = TextUtils.iterAtLineOffset(this.buffer, line - 1, 0);
+                this.buffer.place_cursor(it);
+            }
+        } finally {
+            this.buffer.end_user_action();
+        }
+        this._render();
+        return true;
     }
 };
-
