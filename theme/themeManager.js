@@ -1,4 +1,5 @@
-const { Gio, GLib, Gdk } = imports.gi;
+imports.gi.versions.Gtk = '4.0';
+const { Gio, GLib, Gtk } = imports.gi;
 const { Constants } = imports.constants;
 
 // ============================================================================
@@ -9,6 +10,8 @@ var ThemeManager = class ThemeManager {
     constructor() {
         this.colors = this._loadColors();
         this.monitor = null;
+        this.currentMonitor = null;
+        this._reloadSourceId = 0;
     }
 
     _getThemePath() {
@@ -32,7 +35,8 @@ var ThemeManager = class ThemeManager {
 
             return this._parseTomlColors(new TextDecoder().decode(contents));
         } catch (e) {
-            print(`Failed to load theme: ${e.message}`);
+            if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                logError(e, 'Jotite: failed to load theme');
             return this._getDefaultColors();
         }
     }
@@ -105,134 +109,114 @@ var ThemeManager = class ThemeManager {
         };
     }
 
+    // Watch the Omarchy theme. Omarchy replaces the whole theme directory on a
+    // switch, which fires a burst of events; they are coalesced into a single
+    // reload + callback().
     setupMonitor(callback) {
-        try {
-            // Monitor Alacritty theme file
-            const themePath = this._getThemePath();
-            const file = Gio.File.new_for_path(themePath);
-            this.monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
-            this.monitor.connect('changed', () => {
+        if (this.monitor)
+            return;
+        this._callback = callback;
+        const schedule = () => {
+            if (this._reloadSourceId)
+                GLib.source_remove(this._reloadSourceId);
+            this._reloadSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                this._reloadSourceId = 0;
                 this.colors = this._loadColors();
-                callback();
+                this._callback?.();
+                return GLib.SOURCE_REMOVE;
             });
+        };
+        try {
+            const file = Gio.File.new_for_path(this._getThemePath());
+            this.monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
+            this._monitorHandler = this.monitor.connect('changed', schedule);
 
-            // Omarchy replaces the theme directory when switching themes.
-            // Watch its stable parent so subsequent switches keep reloading.
+            // Watch the stable parent of the theme directory so subsequent
+            // switches keep reloading.
             const currentDir = file.get_parent().get_parent();
             if (currentDir.query_exists(null)) {
                 this.currentMonitor = currentDir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
-                this.currentMonitor.connect('changed', (_monitor, changedFile) => {
-                    if (changedFile.get_basename() === 'theme') {
-                        this.colors = this._loadColors();
-                        callback();
-                    }
-                });
-            }
-            
-            // Also monitor GTK CSS file if it exists
-            const homeDir = GLib.get_home_dir();
-            const gtkCssPath = GLib.build_filenamev([homeDir, '.config', 'gtk-4.0', 'gtk.css']);
-            const gtkCssFile = Gio.File.new_for_path(gtkCssPath);
-            
-            if (gtkCssFile.query_exists(null)) {
-                this.gtkMonitor = gtkCssFile.monitor_file(Gio.FileMonitorFlags.NONE, null);
-                this.gtkMonitor.connect('changed', () => {
-                    this.colors = this._loadColors();
-                    callback();
+                this._currentMonitorHandler = this.currentMonitor.connect('changed', (_monitor, changedFile) => {
+                    if (changedFile.get_basename() === 'theme')
+                        schedule();
                 });
             }
         } catch (e) {
-            print(`Failed to setup theme monitor: ${e.message}`);
+            logError(e, 'Jotite: failed to watch theme');
         }
     }
 
-    generateCSS(zoomLevel = 100) {
+    destroy() {
+        if (this._reloadSourceId) {
+            GLib.source_remove(this._reloadSourceId);
+            this._reloadSourceId = 0;
+        }
+        for (const [m, h] of [['monitor', '_monitorHandler'], ['currentMonitor', '_currentMonitorHandler']]) {
+            if (this[m]) {
+                if (this[h])
+                    this[m].disconnect(this[h]);
+                this[m].cancel();
+                this[m] = null;
+            }
+        }
+        this._callback = null;
+    }
+
+    // CSS for Jotite's own widgets. Everything is scoped to .jot-window so
+    // other dialogs (file chooser etc.) keep the system style.
+    generateCSS() {
         const c = this.colors;
-        const zoom = zoomLevel / 100;
-        
-        // Helper to convert hex to rgba
         const hexToRgba = (hex, alpha) => {
             const r = parseInt(hex.slice(1, 3), 16);
             const g = parseInt(hex.slice(3, 5), 16);
             const b = parseInt(hex.slice(5, 7), 16);
             return `rgba(${r}, ${g}, ${b}, ${alpha})`;
         };
-        
+        const font = String(c.font).replace(/['\\]/g, '');
+
         return `
-            window {
+            window.jot-window {
                 background: ${c.background};
             }
 
-            .jot-textview {
+            .jot-window .jot-textview,
+            .jot-window .jot-textview > text {
                 background: transparent;
                 color: ${c.foreground};
-                font-size: ${15 * zoom}px;
-                font-family: '${c.font}', monospace;
+            }
+
+            .jot-window .jot-textview {
+                font-size: 15px;
+                font-family: '${font}', monospace;
                 caret-color: ${c.white};
             }
 
-            .jot-textview text {
-                background: transparent;
-                color: ${c.foreground};
-            }
-            
-            textview {
-                background: transparent;
-                color: ${c.foreground};
-            }
-            
-            textview > text {
-                background: transparent;
-                color: ${c.foreground};
-            }
-
-            .jot-textview selection {
+            .jot-window .jot-textview selection {
                 background-color: ${c.blue};
                 color: ${c.white};
             }
 
-            .jot-button {
-                padding: 4px 12px;
-                border-radius: 0;
-                border: 1px solid ${c.white};
-                background: ${c.black};
-                color: ${c.white};
-                font-weight: 500;
-                font-size: 11px;
-            }
-
-            .jot-button:hover {
-                background: ${c.white};
-                color: ${c.black};
-            }
-
-            .jot-button-save {
-                background: ${c.green};
-                border-color: ${c.green};
-                color: ${c.black};
-            }
-
-            .jot-button-save:hover {
-                background: ${c.blue};
-                border-color: ${c.blue};
-            }
-
-            .jot-statusbar {
+            .jot-window .jot-statusbar {
                 border-top: 1px solid ${hexToRgba(c.white, 0.2)};
                 padding-top: 4px;
             }
 
-            .status-label {
+            .jot-window .status-label {
                 color: ${c.white};
                 opacity: 0.3;
                 font-size: 12px;
             }
-            
-            .status-label:hover {
+
+            .jot-window .status-label:hover {
                 opacity: 0.5;
             }
 
-            .status-button {
+            .jot-window .status-label.status-error {
+                color: ${c.red};
+                opacity: 0.9;
+            }
+
+            .jot-window .status-button {
                 padding: 0px 4px;
                 margin: 0px;
                 border: none;
@@ -243,194 +227,34 @@ var ThemeManager = class ThemeManager {
                 font-weight: 400;
                 min-width: 0;
                 min-height: 0;
-                line-height: 1;
             }
 
-            .status-button > * {
+            .jot-window .status-button > * {
                 margin: 0;
                 padding: 0;
             }
 
-            .status-settings-button {
+            .jot-window .status-settings-button {
                 padding: 0px 2px;
             }
 
-            .status-button:hover {
+            .jot-window .status-button:hover {
                 opacity: 0.6;
                 background: transparent;
             }
 
-            .jot-hash {
-                color: ${c.white};
-                font-size: ${18 * zoom}px;
-                font-weight: bold;
-                font-family: '${c.font}', monospace;
-                margin-right: 8px;
-            }
-
-            .jot-title {
+            .jot-window searchbar {
                 background: transparent;
-                border: none;
-                color: ${c.white};
-                font-size: ${18 * zoom}px;
-                font-weight: bold;
-                font-family: '${c.font}', monospace;
-                padding: 0;
-                box-shadow: none;
-                outline: none;
-            }
-
-            .jot-title:focus {
-                outline: none;
-                box-shadow: none;
-                border: none;
-            }
-
-            entry {
-                outline: none;
-                box-shadow: none;
-            }
-
-            entry:focus {
-                outline: none;
-                box-shadow: none;
-                border: none;
-            }
-
-            .jot-open-button {
-                padding: 4px 12px;
-                border-radius: 0;
-                border: 1px solid ${c.white};
-                background: ${c.black};
-                color: ${c.white};
-                font-weight: 500;
-                font-size: 11px;
-            }
-
-            .jot-open-button:hover {
-                background: ${c.white};
-                color: ${c.black};
-            }
-
-            /* Dialog and FileChooser styling */
-            dialog, window.dialog {
-                background: ${c.background};
-                color: ${c.foreground};
-            }
-
-            dialog > box {
-                background: ${c.background};
-            }
-
-            filechooser, .filechooser {
-                background: ${c.background};
-                color: ${c.foreground};
-            }
-
-            filechooser > box {
-                background: ${c.background};
-            }
-
-            filechooser button {
-                background: ${c.black};
-                color: ${c.foreground};
-                border: 1px solid ${c.white};
-            }
-
-            filechooser button:hover {
-                background: ${c.white};
-                color: ${c.black};
-            }
-
-            filechooser entry {
-                background: ${c.black};
-                color: ${c.foreground};
-                border: 1px solid ${c.white};
-            }
-
-            filechooser treeview, filechooser listview {
-                background: ${c.background};
-                color: ${c.foreground};
-            }
-
-            filechooser scrolledwindow {
-                background: ${c.background};
-            }
-
-            /* Sidebar styling */
-            .sidebar, sidebar {
-                background: ${c.black};
-                color: ${c.foreground};
-            }
-
-            .sidebar row, sidebar row {
-                background: ${c.black};
-                color: ${c.foreground};
-            }
-
-            .sidebar row:selected, sidebar row:selected {
-                background: ${c.blue};
-                color: ${c.foreground};
-            }
-
-            /* Pathbar styling */
-            .pathbar, pathbar {
-                background: ${c.black};
-                color: ${c.foreground};
-            }
-
-            /* List and tree view styling */
-            treeview, listview, list {
-                background: ${c.background};
-                color: ${c.foreground};
-            }
-
-            treeview:selected, listview:selected, list row:selected {
-                background: ${c.blue};
-                color: ${c.foreground};
-            }
-
-            /* Popover styling */
-            popover, .popover {
-                background: ${c.background};
-                color: ${c.foreground};
-                border: 1px solid ${c.white};
-            }
-
-            popover > contents {
-                background: ${c.background};
-            }
-
-            /* Menu styling */
-            menu, .menu {
-                background: ${c.background};
-                color: ${c.foreground};
-                border: 1px solid ${c.white};
-            }
-
-            menuitem {
-                color: ${c.foreground};
-            }
-
-            menuitem:hover {
-                background: ${c.blue};
-            }
-
-            /* Search bar styling - match status bar */
-            searchbar {
-                background: transparent;
-                background-color: transparent;
                 background-image: none;
                 border-bottom: 1px solid ${hexToRgba(c.white, 0.2)};
                 padding: 0;
             }
-            
-            searchbar > revealer > box {
+
+            .jot-window searchbar > revealer > box {
                 background: transparent;
-                background-color: transparent;
             }
 
-            .search-entry {
+            .jot-window .search-entry {
                 background: transparent;
                 color: ${c.white};
                 border: 1px solid ${hexToRgba(c.white, 0.2)};
@@ -439,14 +263,16 @@ var ThemeManager = class ThemeManager {
                 min-width: 200px;
                 font-size: 12px;
                 min-height: 0;
+                outline: none;
+                box-shadow: none;
             }
 
-            .search-entry:focus {
+            .jot-window .search-entry:focus-within {
                 border-color: ${hexToRgba(c.white, 0.4)};
                 outline: none;
             }
 
-            .search-button {
+            .jot-window .search-button {
                 padding: 0px 6px;
                 margin: 0px;
                 border: 1px solid ${hexToRgba(c.white, 0.1)};
@@ -460,17 +286,17 @@ var ThemeManager = class ThemeManager {
                 min-height: 0;
             }
 
-            .search-button:hover {
+            .jot-window .search-button:hover {
                 opacity: 0.6;
                 background: transparent;
             }
-            
-            button.search-button:checked {
+
+            .jot-window button.search-button:checked {
                 border: 1px solid ${c.white};
                 opacity: 1.0;
             }
 
-            .search-match-label {
+            .jot-window .search-match-label {
                 color: ${c.white};
                 opacity: 0.3;
                 font-size: 12px;
@@ -478,20 +304,41 @@ var ThemeManager = class ThemeManager {
                 padding: 0;
                 min-width: 0;
             }
-            
-            .search-match-label:empty {
-                min-width: 0;
-                padding: 0;
-                margin: 0;
-            }
-
-            .search-match-highlight {
-                background: ${hexToRgba(c.yellow, 0.3)};
-            }
-
-            .search-current-match {
-                background: ${hexToRgba(c.blue, 0.5)};
-            }
         `;
     }
+};
+
+// One display-wide provider carries the theme CSS for all Jotite windows
+// (its selectors only match .jot-window). Windows call applyThemeCss() on
+// theme changes; the last window to close calls releaseThemeCss().
+let _themeProvider = null;
+let _themeCssText = null;
+let _themeUsers = 0;
+
+function acquireThemeCss(display, css) {
+    _themeUsers++;
+    applyThemeCss(display, css);
 }
+
+function applyThemeCss(display, css) {
+    if (!_themeProvider) {
+        _themeProvider = new Gtk.CssProvider();
+        Gtk.StyleContext.add_provider_for_display(display, _themeProvider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+    if (_themeCssText !== css) {
+        _themeCssText = css;
+        _themeProvider.load_from_string(css);
+    }
+}
+
+function releaseThemeCss(display) {
+    _themeUsers = Math.max(0, _themeUsers - 1);
+    if (_themeUsers === 0 && _themeProvider) {
+        Gtk.StyleContext.remove_provider_for_display(display, _themeProvider);
+        _themeProvider = null;
+        _themeCssText = null;
+    }
+}
+
+var ThemeCss = { acquire: acquireThemeCss, apply: applyThemeCss, release: releaseThemeCss };
