@@ -27,11 +27,13 @@ const DIRTY_TAG = 1;   // re-apply tags
 const DIRTY_TEXT = 2;  // re-read text, re-classify and re-apply tags
 
 const CHUNK_BUDGET_US = 8000;     // max time per background render chunk
-const SYNC_LINE_LIMIT = 400;      // lines tagged synchronously before chunking
+const MEASURE_BUDGET_US = 4000;   // max time per hanging-indent measuring pass
+const SYNC_LINE_LIMIT = 100;      // lines tagged synchronously before chunking
 const VISIBLE_MARGIN = 10;        // extra lines around the visible region
+const UNMAPPED_LINES = 30;        // lines assumed visible before the view is shown
 const MAX_INDENT_TAGS = 512;
 const CHUNK_PRIORITY = GLib.PRIORITY_HIGH_IDLE + 22; // GDK_PRIORITY_REDRAW + 2
-const CLASSIFY_CHUNK_LINES = 3000; // lines classified per background chunk
+const CLASSIFY_CHUNK_LINES = 2000; // lines classified per background chunk
 
 const HEADING_SCALES = [5.4, 4.5, 3.6, 3.3, 3.15, 3.0];
 const EMOJI_HEADING_FACTOR = 0.60;
@@ -95,6 +97,9 @@ var MarkdownRenderer = class MarkdownRenderer {
         this._gradientTags = new Map(); // tag name -> {tag, mood} (created lazily)
         this._indentTags = new Map();   // prefix key -> {tag, gen, text, box, checked, revealed}
         this._indentSeq = 0;
+        this._measureQueue = new Set(); // indent entries waiting to be measured
+        this._measureId = 0;
+        this._pxPerChar = 0;
         this._metricsGen = 0;
         this._fontPx = 0;
         this._fallbackCache = new Map();
@@ -160,6 +165,7 @@ var MarkdownRenderer = class MarkdownRenderer {
             this._flushId = 0;
         }
         this._flush(full ? Infinity : 0);
+        if (full) this._measurePending();
     }
 
     // Re-render the whole document (e.g. after loading a file). Visible
@@ -262,6 +268,9 @@ var MarkdownRenderer = class MarkdownRenderer {
         this._handlers = [];
         if (this._flushId) GLib.source_remove(this._flushId);
         if (this._chunkId) GLib.source_remove(this._chunkId);
+        if (this._measureId) GLib.source_remove(this._measureId);
+        this._measureId = 0;
+        this._measureQueue.clear();
         if (this._tickId) this.textView.remove_tick_callback(this._tickId);
         this._flushId = this._chunkId = this._tickId = 0;
         this.textView.bulletColor = null;
@@ -405,7 +414,9 @@ var MarkdownRenderer = class MarkdownRenderer {
         let r = this._fallbackCache.get(ch);
         if (r !== undefined) return r;
         const cp = ch.codePointAt(0);
-        if (isEmoji(cp)) {
+        if (cp >= 0x20 && cp <= 0x7e) {
+            r = false; // the pixel font covers printable ASCII
+        } else if (isEmoji(cp)) {
             r = true;
         } else {
             if (this._headerFont === undefined) {
@@ -473,12 +484,41 @@ var MarkdownRenderer = class MarkdownRenderer {
             entry = { tag, gen: -1, text: prefix.text, box: prefix.box, checked, revealed };
             this._indentTags.set(key, entry);
         }
-        if (entry.gen !== this._metricsGen) this._updateIndent(entry);
+        if (entry.gen !== this._metricsGen) {
+            // Measuring with Pango is slow the first time a font is used, so
+            // it is done right after this render pass (before the frame is
+            // drawn); until then use an estimate from earlier measurements.
+            if (entry.gen < 0 && this._pxPerChar > 0)
+                entry.tag.indent = -Math.round(this._pxPerChar * entry.text.length);
+            this._measureQueue.add(entry);
+            this._scheduleMeasure();
+        }
         return entry.tag;
+    }
+
+    _scheduleMeasure() {
+        if (this._measureId || this._destroyed) return;
+        this._measureId = GLib.idle_add(GLib.PRIORITY_HIGH_IDLE, () => {
+            this._measureId = 0;
+            this._measurePending(MEASURE_BUDGET_US);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // Measure queued hanging indents, within budgetUs (rest rescheduled)
+    _measurePending(budgetUs = Infinity) {
+        const t0 = GLib.get_monotonic_time();
+        for (const entry of this._measureQueue) {
+            this._measureQueue.delete(entry);
+            if (entry.gen !== this._metricsGen) this._updateIndent(entry);
+            if (GLib.get_monotonic_time() - t0 > budgetUs) break;
+        }
+        if (this._measureQueue.size) this._scheduleMeasure();
     }
 
     _updateIndent(entry) {
         const width = this._measurePrefix(entry.text, entry.box, entry.checked, entry.revealed);
+        if (entry.text.length > 0 && width > 0) this._pxPerChar = width / entry.text.length;
         // Negative indent = hanging indent: the first line starts at the
         // margin, wrapped lines are indented to the item's content.
         if (entry.tag.indent !== -width) entry.tag.indent = -width;
@@ -489,6 +529,7 @@ var MarkdownRenderer = class MarkdownRenderer {
     // in case the new CSS font is applied lazily.
     _refreshMetrics() {
         this._metricsGen++;
+        this._measureQueue.clear();
         for (const entry of this._indentTags.values()) this._updateIndent(entry);
         if (!this._tickId && !this._destroyed) {
             let frames = 0;
@@ -809,10 +850,13 @@ var MarkdownRenderer = class MarkdownRenderer {
         if (this._destroyed || this._inFlush) return;
         this._inFlush = true;
         try {
+            const t0 = GLib.get_monotonic_time();
             this._applyPendingEdit();
             if (this._classifyPending()) this._classify(this._clsLo + CLASSIFY_CHUNK_LINES);
             this._updateReveal();
-            this._tagPending(CHUNK_BUDGET_US);
+            // Tag with what is left of this chunk's budget
+            const left = CHUNK_BUDGET_US - (GLib.get_monotonic_time() - t0);
+            this._tagPending(Math.max(1000, left));
         } catch (e) {
             logError(e, 'Jotite markdown renderer');
         } finally {
@@ -843,8 +887,11 @@ var MarkdownRenderer = class MarkdownRenderer {
             a = tv.get_line_at_y(rect.y)[0].get_line();
             b = tv.get_line_at_y(rect.y + rect.height)[0].get_line();
         } else {
+            // Not shown yet (e.g. loading a file before the window maps):
+            // a window's worth of lines from the cursor. The rest follows in
+            // background chunks, which run before the first frame is drawn.
             a = b = this.buffer.get_iter_at_mark(this._insertMark).get_line();
-            b += 40;
+            return [Math.max(0, a), Math.min(n - 1, b + UNMAPPED_LINES)];
         }
         return [Math.max(0, a - VISIBLE_MARGIN), Math.min(n - 1, b + VISIBLE_MARGIN)];
     }
@@ -868,7 +915,9 @@ var MarkdownRenderer = class MarkdownRenderer {
         for (let i = lo; i <= hi && pending <= SYNC_LINE_LIMIT; i++)
             if (this._dirty[i] !== DIRTY_NONE) pending++;
 
-        const all = pending <= SYNC_LINE_LIMIT || budgetUs === Infinity;
+        // Small edits are rendered completely right away; background chunks
+        // always stay within their time budget
+        const all = budgetUs === Infinity || (budgetUs === 0 && pending <= SYNC_LINE_LIMIT);
         if (!all) {
             const [va, vb] = this._visibleRange();
             for (let i = va; i <= vb; i++) tagIfDirty(i);
@@ -876,11 +925,10 @@ var MarkdownRenderer = class MarkdownRenderer {
 
         const t0 = GLib.get_monotonic_time();
         let i = lo;
-        let done = 0;
         for (; i <= hi; i++) {
             if (this._dirty[i] !== DIRTY_NONE) {
                 this._tagLineSafe(i);
-                if (!all && (++done & 7) === 0 && GLib.get_monotonic_time() - t0 > budgetUs) {
+                if (!all && GLib.get_monotonic_time() - t0 > budgetUs) {
                     i++;
                     break;
                 }

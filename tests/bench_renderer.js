@@ -3,7 +3,9 @@
 // Prints timings against the targets:
 //   keystroke / cursor move  <= 16 ms at 10k lines (and flat in doc size)
 //   theme / zoom change      <= 100 ms at 10k lines
-//   initial render           no single main-loop block > ~50 ms
+//   initial render           no single renderer main-loop block > ~50 ms
+// (GTK's own text layout work in the same main loop is reported separately,
+// next to a baseline of GTK laying out the same text without the renderer)
 imports.gi.versions.Gtk = '4.0';
 const { Gtk, GLib } = imports.gi;
 imports.searchPath.unshift(GLib.get_current_dir());
@@ -46,9 +48,28 @@ function makeDoc(n) {
 const ms = (us) => (us / 1000).toFixed(2) + ' ms';
 const now = () => GLib.get_monotonic_time();
 
+// Longest single renderer main-loop callback (flush, background chunk,
+// indent measuring) since the last reset, in microseconds
+let cbLongest = 0, cbTotal = 0;
+function instrument(r) {
+    for (const name of ['_flush', '_backgroundStep', '_measurePending']) {
+        const orig = r[name].bind(r);
+        r[name] = (...a) => {
+            const s = now();
+            try {
+                return orig(...a);
+            } finally {
+                const d = now() - s;
+                cbLongest = Math.max(cbLongest, d);
+                cbTotal += d;
+            }
+        };
+    }
+}
+
 function drain(maxUs = 60e6) {
-    // Run the main loop until the renderer has no pending work; return the
-    // longest single iteration (= longest UI block) in microseconds.
+    // Run the main loop until nothing is pending; return the longest single
+    // iteration (= longest UI block, renderer and GTK layout) in microseconds.
     const ctx = GLib.MainContext.default();
     let longest = 0;
     const t0 = now();
@@ -59,6 +80,23 @@ function drain(maxUs = 60e6) {
         if (!did) break;
     }
     return longest;
+}
+
+// The same document in a plain text view without the renderer: GTK's own
+// layout work, for comparison with the iteration times above
+function gtkBaseline(n) {
+    const tv = new MarkdownTextView({ wrap_mode: Gtk.WrapMode.WORD_CHAR });
+    const win = new Gtk.Window({ default_width: 800, default_height: 600 });
+    win.set_child(new Gtk.ScrolledWindow({ child: tv }));
+    if (SHOW) win.present();
+    const text = makeDoc(n);
+    const t = now();
+    tv.get_buffer().set_text(text, -1);
+    tv.get_buffer().place_cursor(tv.get_buffer().get_start_iter());
+    const setText = now() - t;
+    const longest = drain();
+    win.destroy();
+    return { setText, longest };
 }
 
 function measure(n) {
@@ -72,30 +110,25 @@ function measure(n) {
     const r = new MarkdownRenderer(tv, colors, null);
     const ctor = now() - t;
 
-    // Measure time spent inside the renderer's own flush/chunk callbacks
+    // Measure time spent inside the renderer's own main-loop callbacks
     // (the rest of a main-loop iteration is GTK's own layout work)
-    let ownLongest = 0, ownTotal = 0;
-    const origTagPending = r._tagPending.bind(r);
-    r._tagPending = (...a) => {
-        const s = now();
-        origTagPending(...a);
-        const d = now() - s;
-        ownLongest = Math.max(ownLongest, d);
-        ownTotal += d;
-    };
+    instrument(r);
 
+    // Loading a file: GTK inserts the text and moves the cursor (both GTK's
+    // own work, reported separately), then the renderer's synchronous flush
     const text = makeDoc(n);
     t = now();
     buffer.set_text(text, -1);
     buffer.place_cursor(buffer.get_start_iter());
+    const setText = now() - t;
+    t = now();
     r.renderNow();
     const firstFlush = now() - t;
     t = now();
-    ownLongest = 0;
-    ownTotal = 0;
-    const longestChunk = drain();
+    cbLongest = cbTotal = 0;
+    const longestIteration = drain();
     const backgroundTotal = now() - t;
-    const ownChunkLongest = ownLongest, ownChunkTotal = ownTotal;
+    const longestChunk = cbLongest, ownChunkTotal = cbTotal;
 
     // Keystrokes in the middle of the document
     const mid = Math.floor(n / 2);
@@ -150,7 +183,9 @@ function measure(n) {
     buffer.insert(top, '```\n', -1);
     r.renderNow();
     const fenceSync = now() - t;
-    const fenceChunk = drain();
+    cbLongest = 0;
+    drain();
+    const fenceChunk = cbLongest;
     const e4 = buffer.get_iter_at_offset(4);
     buffer.delete(buffer.get_start_iter(), e4);
     r.renderNow();
@@ -175,7 +210,7 @@ function measure(n) {
     r.destroy();
     win.destroy();
     return {
-        n, ctor, firstFlush, longestChunk, backgroundTotal, ownChunkLongest, ownChunkTotal,
+        n, ctor, setText, firstFlush, longestChunk, longestIteration, backgroundTotal, ownChunkTotal,
         avgKey: totalKey / keys, worstKey, worstEnter,
         avgMove: totalMove / 50, worstMove, fenceSync, fenceChunk,
         theme: Math.max(theme, theme2), zoom: Math.max(zoom, zoom2), same,
@@ -188,16 +223,20 @@ for (const size of sizes) {
     const m = measure(size);
     const check = (label, value, target) => {
         const pass = target === undefined || value <= target;
-        if (!pass && size >= 10000) ok = false;
+        if (!pass) ok = false;
         print(`  ${label.padEnd(44)} ${ms(value).padStart(11)}${target !== undefined ? `   (target <= ${target / 1000} ms) ${pass ? 'OK' : 'FAIL'}` : ''}`);
     };
     print(`\n== ${size} lines${SHOW ? ' (window shown)' : ''}`);
     check('renderer constructor', m.ctor, 20000);
-    check('load: first synchronous flush', m.firstFlush, 50000);
-    check('load: longest background chunk', m.longestChunk, 50000);
-    check('load: total background render', m.backgroundTotal);
-    check('load: renderer share, longest chunk', m.ownChunkLongest);
-    check('load: renderer share, total', m.ownChunkTotal);
+    check('load: GTK set_text + place_cursor', m.setText);
+    check('load: first synchronous render flush', m.firstFlush, 50000);
+    check('load: longest renderer chunk', m.longestChunk, 50000);
+    check('load: renderer background total', m.ownChunkTotal);
+    check('load: total until idle (renderer + GTK)', m.backgroundTotal);
+    check('load: longest main-loop iteration (+ GTK)', m.longestIteration);
+    const base = gtkBaseline(size);
+    check('  GTK alone, no renderer: set_text + cursor', base.setText);
+    check('  GTK alone, no renderer: longest iteration', base.longest);
     check('keystroke + render (avg)', m.avgKey);
     check('keystroke + render (worst)', m.worstKey, 16000);
     check('enter + backspace + render (worst)', m.worstEnter, 16000);

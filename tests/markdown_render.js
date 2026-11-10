@@ -395,6 +395,38 @@ function hasTag(b, offset, name) {
     win.destroy();
 }
 
+// --- Background chunks stay within their time budget ------------------------
+{
+    const lines = [];
+    for (let i = 0; i < 300; i++) lines.push(i % 3 ? `- item ${i} **b**` : `# H ${i}`);
+    const { b, r, win } = make(undefined);
+    b.set_text(lines.join('\n'), -1);
+    place(b, 0);
+    r.renderNow();
+    const pending = () => r._dirty.filter(d => d !== 0).length;
+    const before = pending();
+    check(before > 200, `load leaves off-screen lines to background chunks (${before} pending)`);
+    // Fake clock: every reading advances 1 ms, so an 8 ms chunk may tag
+    // only a handful of lines (it used to tag everything once <= 400 lines
+    // were left, regardless of the budget)
+    const realClock = GLib.get_monotonic_time;
+    let fake = realClock();
+    GLib.get_monotonic_time = () => (fake += 1000);
+    try {
+        r._backgroundStep();
+    } finally {
+        GLib.get_monotonic_time = realClock;
+    }
+    const tagged = before - pending();
+    check(tagged > 0 && tagged <= 10, `one background chunk respects its budget (tagged ${tagged} lines)`);
+    r.renderNow(true);
+    eq(pending(), 0, 'full render finishes');
+    const indent = b.get_iter_at_line(1)[1].get_tags().find(t => (t.name || '').startsWith('md-indent-'));
+    check(indent && indent.indent < 0, 'hanging indent measured after a full render');
+    r.destroy();
+    win.destroy();
+}
+
 globalThis.logError = origLogError;
 print(`${passes} passed, ${failures} failed`);
 if (failures > 0) imports.system.exit(1);
