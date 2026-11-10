@@ -308,6 +308,40 @@ async function run(app) {
     check('link: mailto', LinkHandlers.resolve('mailto:a@b.c', null).kind === 'uri');
     check('link: www', LinkHandlers.resolve('www.example.com', null).uri === 'https://www.example.com');
 
+    // ---- Invalid settings.json: status bar only, once per distinct error --
+    {
+        const settingsPath = `${root}/config/jotite/settings.json`;
+        const good = readText(settingsPath);
+        const sw = [new JotWindow(app), new JotWindow(app)];
+        const counts = sw.map(() => ({ errors: 0, flashes: 0 }));
+        sw.forEach((x, k) => {
+            x.present();
+            x.showError = () => counts[k].errors++;
+            const flash = x._flash.bind(x);
+            x._flash = (msg, opts) => {
+                if (msg.includes('settings.json')) counts[k].flashes++;
+                flash(msg, opts);
+            };
+        });
+        await sleep(300);
+        for (const text of ['{ "notesPath": ', '{ "notesPath": ', '{ "notesPath": ']) {
+            GLib.file_set_contents(settingsPath, text);
+            await sleep(500);
+        }
+        check('settings error: no toast/error dialog', counts.every(c => c.errors === 0), JSON.stringify(counts));
+        check('settings error: flashed once per window', counts.every(c => c.flashes === 1), JSON.stringify(counts));
+        check('settings error: warning in status bar', !!sw[0]._statusState().warning);
+        GLib.file_set_contents(settingsPath, good);
+        await sleep(500);
+        check('settings fixed: warning cleared', !sw[0]._statusState().warning);
+        GLib.file_set_contents(settingsPath, '{ broken');
+        await sleep(500);
+        check('settings error again: flashed again', counts.every(c => c.flashes === 2), JSON.stringify(counts));
+        GLib.file_set_contents(settingsPath, good);
+        await sleep(500);
+        sw.forEach(x => x.forceClose());
+    }
+
     // ---- FAQ opens read-only from the app directory (not copied) ---------
     {
         const { SettingsManager } = imports.settings.settingsManager;

@@ -97,6 +97,7 @@ class JotWindow extends Adw.ApplicationWindow {
         else
             this._loadTodayOrNew();
 
+        this._lastSettingsError = this._settingsManager.error;
         if (this._settingsManager.error)
             this._statusBar.refresh();
 
@@ -245,8 +246,13 @@ class JotWindow extends Adw.ApplicationWindow {
             this._cancel('autosave');
         this._updateSuggestedName();
         this._statusBar.refresh();
-        if (this._settingsManager.error)
-            this.showError(this._settingsManager.error);
+        // settings.json errors (often half-typed JSON while editing it, in
+        // Jotite itself) only go to the status bar, once per distinct error;
+        // the warning stays there until the file parses again.
+        const error = this._settingsManager.error;
+        if (error && error !== this._lastSettingsError)
+            this._flash(`⚠ settings.json: ${error}`, { error: true, timeout: 6000 });
+        this._lastSettingsError = error;
     }
 
     _autosaveEnabled() {
