@@ -1,2182 +1,986 @@
 const { Gtk, Gdk, GLib, Pango } = imports.gi;
+const Parser = imports.markdown.parser;
+const Moods = imports.markdown.moods;
 
-// Stand-in for characters outside the Basic Multilingual Plane (most emoji)
-// when matching markdown, see MarkdownRenderer._toBufferIndexed().
-const ASTRAL_PLACEHOLDER = '\uFFFC';
-
-// ============================================================================
-// Markdown Renderer
-// ============================================================================
+const { Kind } = Parser;
 
 // ============================================================================
 // Markdown Renderer
 // ============================================================================
+//
+// Live, incremental markdown styling for a GtkTextView. Rendering only ever
+// applies GtkTextTags; it never modifies buffer text.
+//
+// Per buffer line the renderer keeps the line text, its block kind and the
+// fence state after it (see markdown/parser.js). Buffer edits splice these
+// arrays and mark the touched lines dirty; an idle callback (running before
+// the next frame is drawn) re-parses dirty lines, continues downwards while
+// the fence state changes (e.g. typing ``` turns the following lines into
+// code) and re-tags only the lines whose rendering changed. Cursor movement
+// re-tags just the line the cursor left and the line it entered, which
+// reveals (dims) markup near the cursor and hides it elsewhere. Large
+// renders (opening a file) tag the visible lines first and the rest in
+// short idle chunks.
+
+const DIRTY_NONE = 0;
+const DIRTY_TAG = 1;   // re-apply tags
+const DIRTY_TEXT = 2;  // re-read text, re-classify and re-apply tags
+
+const CHUNK_BUDGET_US = 8000;     // max time per background render chunk
+const SYNC_LINE_LIMIT = 400;      // lines tagged synchronously before chunking
+const VISIBLE_MARGIN = 10;        // extra lines around the visible region
+const MAX_INDENT_TAGS = 512;
+const CHUNK_PRIORITY = GLib.PRIORITY_HIGH_IDLE + 22; // GDK_PRIORITY_REDRAW + 2
+const CLASSIFY_CHUNK_LINES = 3000; // lines classified per background chunk
+
+const HEADING_SCALES = [5.4, 4.5, 3.6, 3.3, 3.15, 3.0];
+const EMOJI_HEADING_FACTOR = 0.60;
+
+const FENCE_KINDS = new Set([Kind.FENCE_OPEN, Kind.FENCE_CLOSE, Kind.CODE]);
+
+function rgba(hex, alpha = 1) {
+    const c = new Gdk.RGBA();
+    if (!c.parse(hex || '#000000')) c.parse('#000000');
+    c.alpha = alpha;
+    return c;
+}
+
+function lighten(hex, percent) {
+    const c = rgba(hex);
+    const f = (v) => Math.min(255, Math.floor(v * 255 + (255 - v * 255) * (percent / 100)));
+    return '#' + [c.red, c.green, c.blue].map(v => f(v).toString(16).padStart(2, '0')).join('');
+}
+
+function isEmoji(codePoint) {
+    return (
+        (codePoint >= 0x1F600 && codePoint <= 0x1F64F) ||
+        (codePoint >= 0x1F300 && codePoint <= 0x1F5FF) ||
+        (codePoint >= 0x1F680 && codePoint <= 0x1F6FF) ||
+        (codePoint >= 0x1F1E0 && codePoint <= 0x1F1FF) ||
+        (codePoint >= 0x2600 && codePoint <= 0x26FF) ||
+        (codePoint >= 0x2700 && codePoint <= 0x27BF) ||
+        (codePoint >= 0xFE00 && codePoint <= 0xFE0F) ||
+        (codePoint >= 0x1F900 && codePoint <= 0x1F9FF) ||
+        (codePoint >= 0x1FA00 && codePoint <= 0x1FAFF) ||
+        (codePoint >= 0x231A && codePoint <= 0x231B) ||
+        (codePoint >= 0x23E9 && codePoint <= 0x23F3) ||
+        (codePoint >= 0x25AA && codePoint <= 0x25AB) ||
+        (codePoint >= 0x25B6 && codePoint <= 0x25C0) ||
+        (codePoint >= 0x25FB && codePoint <= 0x25FE) ||
+        (codePoint >= 0x2B50 && codePoint <= 0x2B55) ||
+        (codePoint >= 0x2B05 && codePoint <= 0x2B07) ||
+        (codePoint >= 0x2B1B && codePoint <= 0x2B1C) ||
+        (codePoint >= 0x2194 && codePoint <= 0x2199) ||
+        (codePoint >= 0x21A9 && codePoint <= 0x21AA) ||
+        (codePoint >= 0x2934 && codePoint <= 0x2935) ||
+        codePoint === 0x203C || codePoint === 0x2049 ||
+        codePoint === 0x2122 || codePoint === 0x2139 ||
+        codePoint === 0x24C2 ||
+        codePoint === 0x3030 || codePoint === 0x303D ||
+        codePoint === 0x3297 || codePoint === 0x3299 ||
+        codePoint === 0x200D || codePoint >= 0x1F000
+    );
+}
 
 var MarkdownRenderer = class MarkdownRenderer {
     constructor(textView, colors, moodConfig = null) {
         this.textView = textView;
         this.buffer = textView.get_buffer();
-        this.colors = colors;
-        this.moodConfig = moodConfig || this._getDefaultMoods();
-        this.updating = false;
-        this.lastCursorPosition = -1;
-        this._previousCursorPosition = -1; // Track position from previous update for arrow direction
-        this._renderTimeoutId = null;
-        this._cursorTimeoutId = null;
-        this._textJustChanged = false; // Track if text was recently changed
-        this._appliedTags = new Set(); // Track which tags we actually applied (Optimization #1)
-        this._searchMode = false; // Track if we're in search mode to avoid interfering with selections
-        this._isUndoRedoOperation = false; // Track if we're in an undo/redo operation
-        this._undoRedoResetTimeoutId = null; // Track timeout for resetting undo/redo flag
-        this._indentTagCache = new Map(); // List indent tag names keyed by extra indent + prefix width
-        
-        this._initTags();
-        this._setupSignals();
+        this.colors = colors || {};
+        this._table = this.buffer.get_tag_table();
+        this._destroyed = false;
+
+        this._ownTags = new Set();      // every tag this renderer created
+        this._tagProps = new Map();     // tag -> last applied props (for in-place updates)
+        this._gradientTags = new Map(); // tag name -> {tag, mood} (created lazily)
+        this._indentTags = new Map();   // prefix key -> {tag, gen, text, box, checked, revealed}
+        this._indentSeq = 0;
+        this._metricsGen = 0;
+        this._fontPx = 0;
+        this._fallbackCache = new Map();
+        this._namedTags = new Map();     // tag name -> tag lookup cache
+        this._headerFont = undefined;
+
+        this._removeStaleTags();
+        this._createStaticTags();
+        this._moods = Moods.normalizeMoods(moodConfig);
+
+        // Per-line state (indices are buffer line numbers)
+        const n = this.buffer.get_line_count();
+        this._texts = new Array(n).fill(null);
+        this._kinds = new Array(n).fill(-1);
+        this._fenceOut = new Array(n).fill('');
+        this._dirty = new Array(n).fill(DIRTY_TEXT);
+        // Tags this renderer applied to each line, so re-tagging a line only
+        // removes what is there (inherited by split lines, merged on joins)
+        this._lineTags = Array.from({ length: n }, () => []);
+        this._clsLo = 0;
+        this._clsHi = n - 1;
+        this._tagLo = 0;
+        this._tagHi = n - 1;
+
+        this._reveal = { line: -1, col: -1, lines: new Set() };
+        this._revealValid = false;
+        this._pendingEdit = null;
+        this._carryFrom = -1;           // line whose fence-in state changed (deferred)
+        this._flushId = 0;
+        this._chunkId = 0;
+        this._tickId = 0;
+        this._inFlush = false;
+
+        this._insertMark = this.buffer.get_insert();
+        this._selectionMark = this.buffer.get_selection_bound();
+
+        this._handlers = [
+            this.buffer.connect('insert-text', (b, iter) => this._beginEdit(iter.get_line())),
+            this.buffer.connect_after('insert-text', () => this._applyPendingEdit()),
+            this.buffer.connect('delete-range', (b, start) => this._beginEdit(start.get_line())),
+            this.buffer.connect_after('delete-range', () => this._applyPendingEdit()),
+            this.buffer.connect('changed', () => this._applyPendingEdit()),
+            this.buffer.connect('mark-set', (b, iter, mark) => {
+                if (mark === this._insertMark || mark === this._selectionMark) this._scheduleFlush();
+            }),
+            this.buffer.connect('notify::cursor-position', () => this._scheduleFlush()),
+        ];
+
+        this._applyViewColors();
+        this._scheduleFlush();
     }
-    
-    _getDefaultMoods() {
-        return {
-            metal: { colors: ['#4A5568', '#CBD5E0'] },
-            cobalt: { colors: ['#1B4BC7', '#B7329E', '#C7A27E'] },
-            fire: { colors: ['#FF4500', '#FFD700'] },
-            forest: { colors: ['#228B22', '#90EE90'] },
-            lava: { colors: ['#8B0000', '#FF4500'] },
-            mint: { colors: ['#00C9A7', '#C7FFED'] },
-            amber: { colors: ['#FF8C00', '#FFE4B5'] },
-            ocean: { colors: ['#006994', '#63B8FF'] },
-            solar: { colors: ['#FF6E3D', '#9C6ADE', '#A0E0C4'] },
-            cryo: { colors: ['#8DF6F7', '#FF3A20', '#737E7D'] },
-            stone: { colors: ['#708090', '#B0B8C0'] },
-            ice: { colors: ['#00CED1', '#E0FFFF'] },
-            purple: { colors: ['#6A0DAD', '#DA70D6'] },
-            sunset: { colors: ['#FF6B6B', '#FFA07A'] },
-            royal: { colors: ['#4169E1', '#B0C4DE'] },
-            aurora: { colors: ['#08F7FE', '#FF477E', '#35012C'] },
-            sunken: { colors: ['#4E9A8A', '#C97B28', '#1C2431'] },
-            ghost: { colors: ['#B9F3E4', '#8B4970', '#5C4B3A'] },
-            sulfur: { colors: ['#E5D300', '#2A2A2A', '#3D2B6D'] },
-            velvet: { colors: ['#C8FF00', '#3F0038', '#A77D62'] },
-            cicada: { colors: ['#C6B89E', '#73663F', '#7FD4D9'] },
-            lunar: { colors: ['#C1440E', '#D6D0C8', '#193B69'] },
-            tonic: { colors: ['#A1C349', '#A65A52', '#4E5861'] },
-            ectoplasm: { colors: ['#8FF7A7', '#FF8F8F', '#4D4F59'] },
-            polar: { colors: ['#CFE9F1', '#FF5A1F', '#442C23'] },
-            chiaroscuro: { colors: ['#005466', '#D8785F', '#A58CA0'] },
-            vanta: { colors: ['#0A0A0A', '#00FFD1', '#FF2F92'] },
-            toxicvelvet: { colors: ['#C0FF04', '#5D001E', '#C49B66'] },
-            bruise: { colors: ['#3E8E9D', '#472F62', '#F6B48F'] },
-            bismuth: { colors: ['#F15BB5', '#333333', '#3E9EFF'] },
-            ultralich: { colors: ['#58FF8C', '#4400A1', '#E7DEC2'] },
-            paradox: { colors: ['#FF9C82', '#1D1A1A', '#D0FF45'] },
-            hazmat: { colors: ['#F3FF00', '#EB3AC5', '#0B3B4F'] },
-            feral: { colors: ['#FF9D00', '#36006C', '#6C775C'] },
-        };
+
+    // ------------------------------------------------------------------
+    // Public API
+    // ------------------------------------------------------------------
+
+    // Synchronously render pending changes and the cursor reveal state.
+    // Off-screen lines of a large pending render continue in idle chunks
+    // unless full is true.
+    renderNow(full = false) {
+        if (this._flushId) {
+            GLib.source_remove(this._flushId);
+            this._flushId = 0;
+        }
+        this._flush(full ? Infinity : 0);
     }
-    
-    _lightenColor(color, percent = 10) {
-        // Parse hex color
-        const hex = color.replace('#', '');
-        let r = parseInt(hex.substr(0, 2), 16);
-        let g = parseInt(hex.substr(2, 2), 16);
-        let b = parseInt(hex.substr(4, 2), 16);
-        
-        // Lighten by adding to each channel
-        r = Math.min(255, Math.floor(r + (255 - r) * (percent / 100)));
-        g = Math.min(255, Math.floor(g + (255 - g) * (percent / 100)));
-        b = Math.min(255, Math.floor(b + (255 - b) * (percent / 100)));
-        
-        // Convert back to hex
-        return '#' + 
-            r.toString(16).padStart(2, '0') + 
-            g.toString(16).padStart(2, '0') + 
-            b.toString(16).padStart(2, '0');
+
+    // Re-render the whole document (e.g. after loading a file). Visible
+    // lines are rendered on the next idle, the rest in background chunks.
+    invalidateAll() {
+        const n = this._texts.length;
+        this._dirty.fill(DIRTY_TEXT);
+        this._kinds.fill(-1);
+        this._clsLo = 0;
+        this._clsHi = n - 1;
+        this._tagLo = 0;
+        this._tagHi = n - 1;
+        this._revealValid = false;
+        this._carryFrom = -1;
+        this._refreshMetrics();
+        this._scheduleFlush();
     }
-    
-    _colorWithOpacity(color, opacity) {
-        // Parse hex color and convert to RGBA with opacity
-        const hex = color.replace('#', '');
-        const r = parseInt(hex.substr(0, 2), 16) / 255;
-        const g = parseInt(hex.substr(2, 2), 16) / 255;
-        const b = parseInt(hex.substr(4, 2), 16) / 255;
-        
-        // Return GdkRGBA object
-        const rgba = new Gdk.RGBA();
-        rgba.red = r;
-        rgba.green = g;
-        rgba.blue = b;
-        rgba.alpha = opacity;
-        return rgba;
-    }
-    
-    _isEmoji(char) {
-        // Lines are matched with astral characters replaced, see _toBufferIndexed()
-        if (char === ASTRAL_PLACEHOLDER) return true;
-        
-        // Check if character is an emoji based on Unicode ranges
-        const codePoint = char.codePointAt(0);
-        if (!codePoint) return false;
-        
-        // Common emoji ranges
-        return (
-            (codePoint >= 0x1F600 && codePoint <= 0x1F64F) || // Emoticons
-            (codePoint >= 0x1F300 && codePoint <= 0x1F5FF) || // Misc Symbols and Pictographs
-            (codePoint >= 0x1F680 && codePoint <= 0x1F6FF) || // Transport and Map
-            (codePoint >= 0x1F1E0 && codePoint <= 0x1F1FF) || // Regional flags
-            (codePoint >= 0x2600 && codePoint <= 0x26FF) ||   // Misc symbols
-            (codePoint >= 0x2700 && codePoint <= 0x27BF) ||   // Dingbats
-            (codePoint >= 0xFE00 && codePoint <= 0xFE0F) ||   // Variation Selectors
-            (codePoint >= 0x1F900 && codePoint <= 0x1F9FF) || // Supplemental Symbols and Pictographs
-            (codePoint >= 0x1FA00 && codePoint <= 0x1FA6F) || // Chess Symbols
-            (codePoint >= 0x1FA70 && codePoint <= 0x1FAFF) || // Symbols and Pictographs Extended-A
-            (codePoint >= 0x231A && codePoint <= 0x231B) ||   // Watch
-            (codePoint >= 0x23E9 && codePoint <= 0x23F3) ||   // Arrows
-            (codePoint >= 0x25AA && codePoint <= 0x25AB) ||   // Squares
-            (codePoint >= 0x25B6 && codePoint <= 0x25C0) ||   // Triangles
-            (codePoint >= 0x25FB && codePoint <= 0x25FE) ||   // Squares
-            (codePoint >= 0x2B50 && codePoint <= 0x2B55) ||   // Stars
-            (codePoint >= 0x2B05 && codePoint <= 0x2B07) ||   // Heavy arrows
-            (codePoint >= 0x2B1B && codePoint <= 0x2B1C) ||   // Large squares
-            (codePoint >= 0x2194 && codePoint <= 0x2199) ||   // Arrows with emoji presentation
-            (codePoint >= 0x21A9 && codePoint <= 0x21AA) ||   // Hooked arrows
-            (codePoint >= 0x2934 && codePoint <= 0x2935) ||   // Curved arrows
-            codePoint === 0x203C || codePoint === 0x2049 ||   // ‼ ⁉
-            codePoint === 0x2122 || codePoint === 0x2139 ||   // ™ ℹ
-            codePoint === 0x24C2 ||                           // Ⓜ
-            codePoint === 0x3030 || codePoint === 0x303D ||   // 〰 〽
-            codePoint === 0x3297 || codePoint === 0x3299      // ㊗ ㊙
-        );
-    }
-    
-    // GTK text buffer offsets count Unicode code points, while JS string
-    // indices count UTF-16 code units. Characters outside the BMP (most emoji)
-    // take two units, which would shift every offset computed after them.
-    // Replace each such character with a single placeholder so that string
-    // indices line up with buffer offsets; _isEmoji() recognises the placeholder.
-    _toBufferIndexed(line) {
-        return line.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ASTRAL_PLACEHOLDER);
-    }
-    
-    // Whether a header character should get the reduced "emoji" scale instead
-    // of the full header scale. The pixel header font only covers Latin text;
-    // emoji and any other glyph it lacks (CJK, Cyrillic, Arabic, arrows) come
-    // from a fallback font whose glyphs are far taller than the pixel font's,
-    // so they are scaled down to keep header lines a sensible height.
-    _needsFallbackScale(char) {
-        if (this._isEmoji(char)) return true;
-        
-        if (this._headerFont === undefined) {
-            try {
-                const desc = Pango.FontDescription.from_string('pxlxxl');
-                this._headerFont = this.textView.get_pango_context().load_font(desc);
-            } catch (e) {
-                this._headerFont = null;
+
+    setMoodConfig(moodConfig) {
+        const oldMoods = new Map(this._moods.map(m => [m.name, m.gradient.join()]));
+        this._moods = Moods.normalizeMoods(moodConfig);
+        const newMoods = new Map(this._moods.map(m => [m.name, m.gradient.join()]));
+
+        // Drop tags of moods that were removed or whose colours changed
+        for (const [name, { tag, mood }] of [...this._gradientTags]) {
+            if (newMoods.get(mood) !== oldMoods.get(mood) || !newMoods.has(mood)) {
+                this._table.remove(tag);
+                this._ownTags.delete(tag);
+                this._gradientTags.delete(name);
             }
         }
-        if (!this._headerFont) return false;
-        
-        return !this._headerFont.has_char(char);
+        for (let i = 0; i < this._kinds.length; i++) {
+            if (this._kinds[i] === Kind.HEADING) this._markTag(i);
+        }
+        this._scheduleFlush();
     }
-    
-    _initTags() {
-        const tagTable = this.buffer.get_tag_table();
-        
-        // Remove existing tags if they exist
-        const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
-         'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
-         'bullet', 'bullet-char', 'bullet-dash', 'bullet-dot', 'bullet-star-raw', 'bullet-star', 'bullet-star-near', 
-         'bullet-margin', 'sub-bullet-margin', 'numbered-list-number', 'numbered-list-margin', 'sub-numbered-list-margin',
-         'dim', 'invisible', 'todo-unchecked', 'todo-checked',
-         'todo-unchecked-inside', 'todo-checked-inside', 'todo-checked-text',
-         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
-         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'search-highlight', 'search-current',
-         'hr-line', 'hr-line-dim'];
-        
-        // Add gradient background tags to removal list for all moods (including custom ones)
-        // Use existing mood names from this.moodConfig if available, otherwise use defaults
-        let moodNamesToRemove = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
-                          'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
-                          'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
-        
-        // If we have existing mood config, add all its mood names to removal list
-        if (this.moodConfig && Object.keys(this.moodConfig).length > 0) {
-            moodNamesToRemove = moodNamesToRemove.concat(Object.keys(this.moodConfig));
-        }
-        
-        // Remove duplicates
-        moodNamesToRemove = [...new Set(moodNamesToRemove)];
-        
-        for (const moodName of moodNamesToRemove) {
-            for (let level = 1; level <= 6; level++) {
-                for (let i = 0; i < 30; i++) {
-                    tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
-                }
-            }
-        }
-        
-        tagsToRemove.forEach(name => {
-            const existing = tagTable.lookup(name);
-            if (existing) tagTable.remove(existing);
-        });
-        
-        // Bold: **text** or __text__
-        const boldTag = new Gtk.TextTag({ name: 'bold', weight: 700 });
-        tagTable.add(boldTag);
-        
-        // Italic: *text* or _text_
-        const italicTag = new Gtk.TextTag({ name: 'italic', style: 2 }); // Pango.Style.ITALIC
-        tagTable.add(italicTag);
-        
-        // Code: `code` - Slack-style with subtle background (slightly lighter than main bg)
-        const codeTag = new Gtk.TextTag({ 
-            name: 'code',
-            family: 'monospace',
-            foreground: this.colors.red,
-            background: this._lightenColor(this.colors.background, 8),  // 8% lighter than background
-            scale: 0.95,  // Slightly smaller but keeps line height consistent
-            weight: 500,
-            rise: -200,  // Slight vertical adjustment for visual balance
-        });
-        tagTable.add(codeTag);
-        
-        // Code block: ```code block``` (slightly lighter than main bg)
-        const codeBlockTag = new Gtk.TextTag({ 
-            name: 'code-block',
-            family: 'monospace',
-            foreground: this.colors.red,
-            paragraph_background: this._lightenColor(this.colors.background, 8),  // 8% lighter than background
-            scale: 0.95,
-            weight: 500,
-        });
-        tagTable.add(codeBlockTag);
-        
-        // Strikethrough: ~~text~~
-        const strikeTag = new Gtk.TextTag({
-            name: 'strikethrough',
-            strikethrough: true,
-        });
-        tagTable.add(strikeTag);
-        
-        // Underline: ++text++
-        const underlineTag = new Gtk.TextTag({
-            name: 'underline',
-            underline: 1,  // Pango.Underline.SINGLE
-        });
-        tagTable.add(underlineTag);
-        
-        // Links: [text](url)
-        const linkTag = new Gtk.TextTag({
-            name: 'link',
-            foreground: this.colors.blue,
-            underline: 1, // Pango.Underline.SINGLE
-        });
-        tagTable.add(linkTag);
-        
-        const linkUrlTag = new Gtk.TextTag({
-            name: 'link-url',
-            foreground: this.colors.magenta,
-            scale: 0.85,
-        });
-        tagTable.add(linkUrlTag);
-        
-        // Headers: # Header (base styles without background, background applied per-character for gradient)
-        const scales = [5.4, 4.5, 3.6, 3.3, 3.15, 3.0];
-        for (let i = 1; i <= 6; i++) {
-            const tag = new Gtk.TextTag({
-                name: `heading${i}`,
-                scale: scales[i-1],
-                weight: 400,
-                family: 'pxlxxl',
-            });
-            tagTable.add(tag);
-        }
-        
-        // Emoji tags for headers: emojis need smaller scale to match pixel font size
-        // Emojis are significantly larger than pixel fonts, so scale them down by ~0.60
-        const emojiScales = scales.map(s => s * 0.60);
-        for (let i = 1; i <= 6; i++) {
-            const tag = new Gtk.TextTag({
-                name: `emoji-h${i}`,
-                scale: emojiScales[i-1],
-                weight: 400,
-            });
-            tagTable.add(tag);
-        }
-        
-        // Use moods from configuration (this.moodConfig is set in constructor)
-        const moods = this.moodConfig;
-        
-        this.moodNames = Object.keys(moods);
-        this.moodGradients = {};
-        
-        // Helper function to parse hex color
-        const parseColor = (hex) => {
-            return {
-                r: parseInt(hex.slice(1, 3), 16),
-                g: parseInt(hex.slice(3, 5), 16),
-                b: parseInt(hex.slice(5, 7), 16)
-            };
-        };
-        
-        // Helper function to create hex from RGB
-        const toHex = (r, g, b) => {
-            return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-        };
-        
-        // Generate gradient steps for each mood that loops smoothly
-        // Optimization #2: Reduced to 8 steps for blocky aesthetic
-        const steps = 20;
-        for (const [moodName, moodData] of Object.entries(moods)) {
-            const gradientColors = [];
-            const palette = moodData.colors.map(parseColor);
-            
-            if (palette.length === 0) {
-                // No colors defined, skip this mood
-                print(`Warning: Mood "${moodName}" has no colors defined`);
-                continue;
-            } else if (palette.length === 1) {
-                // 1-color mood: use the same color for all steps
-                const color = toHex(palette[0].r, palette[0].g, palette[0].b);
-                for (let i = 0; i < steps; i++) {
-                    gradientColors.push(color);
-                }
-            } else {
-                // N-color gradient (N >= 2): create a smooth loop through all colors and back
-                // For N colors, we have (N-1)*2 segments to create a complete loop
-                const numSegments = (palette.length - 1) * 2;
-                const segmentSteps = Math.floor(steps / numSegments);
-                
-                // Helper function to interpolate between two colors
-                const interpolateColors = (color1, color2, ratio) => {
-                    const r = Math.round(color1.r + (color2.r - color1.r) * ratio);
-                    const g = Math.round(color1.g + (color2.g - color1.g) * ratio);
-                    const b = Math.round(color1.b + (color2.b - color1.b) * ratio);
-                    return toHex(r, g, b);
-                };
-                
-                // Forward pass: go through all colors 0->1->2->...->N-1
-                for (let segmentIdx = 0; segmentIdx < palette.length - 1; segmentIdx++) {
-                    const startColor = palette[segmentIdx];
-                    const endColor = palette[segmentIdx + 1];
-                    
-                    for (let i = 0; i < segmentSteps; i++) {
-                        const ratio = i / (segmentSteps - 1 || 1);
-                        gradientColors.push(interpolateColors(startColor, endColor, ratio));
-                    }
-                }
-                
-                // Backward pass: go back through all colors N-1->...->2->1->0
-                for (let segmentIdx = palette.length - 1; segmentIdx > 0; segmentIdx--) {
-                    const startColor = palette[segmentIdx];
-                    const endColor = palette[segmentIdx - 1];
-                    
-                    for (let i = 0; i < segmentSteps; i++) {
-                        const ratio = i / (segmentSteps - 1 || 1);
-                        gradientColors.push(interpolateColors(startColor, endColor, ratio));
-                    }
-                }
-            }
-            
-            this.moodGradients[moodName] = gradientColors;
-        }
-        
-        // Create gradient foreground color tags for each mood, heading level, and color step
-        for (const moodName of this.moodNames) {
-            const gradientColors = this.moodGradients[moodName];
-            for (let level = 1; level <= 6; level++) {
-                for (let i = 0; i < gradientColors.length; i++) {
-                    const tag = new Gtk.TextTag({
-                        name: `gradient-${moodName}-h${level}-${i}`,
-                        scale: scales[level-1],
-                        weight: 400,
-                        family: 'pxlxxl',
-                        foreground: gradientColors[i],
-                    });
-                    tagTable.add(tag);
-                }
-            }
-        }
-        
-        // Bullet character styling for dash "-" (with reduced opacity, same weight)
-        const bulletDashTag = new Gtk.TextTag({
-            name: 'bullet-dash',
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.5),
-        });
-        tagTable.add(bulletDashTag);
-        
-        // Keep the asterisk's advance width while the text view draws a solid dot.
-        this.textView.bulletColor = this._colorWithOpacity(this.colors.foreground, 0.35);
-        const bulletStarTag = new Gtk.TextTag({
-            name: 'bullet-star',
-            // Pango treats zero alpha as unset; use the smallest nonzero alpha.
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 1 / 65535),
-        });
-        tagTable.add(bulletStarTag);
-        
-        // Bullet character styling for asterisk "*" when cursor is nearby (visible, dimmed)
-        const bulletStarNearTag = new Gtk.TextTag({
-            name: 'bullet-star-near',
-            foreground: this.colors.cyan,
-        });
-        tagTable.add(bulletStarNearTag);
-        
-        // Bullet line margins: persistent margins for main bullets
-        const bulletMarginTag = new Gtk.TextTag({
-            name: 'bullet-margin',
-            pixels_above_lines: 1,  // Margin above main bullet items
-            pixels_below_lines: 1,  // Margin below main bullet items
-        });
-        tagTable.add(bulletMarginTag);
-        
-        // Sub-bullet line margins: persistent margins for indented bullets
-        const subBulletMarginTag = new Gtk.TextTag({
-            name: 'sub-bullet-margin',
-            pixels_above_lines: 1,  // Margin above sub-bullet items
-            pixels_below_lines: 1,  // Margin below sub-bullet items
-        });
-        tagTable.add(subBulletMarginTag);
-        
-        // Numbered list number styling (with reduced opacity, similar to bullet-dash)
-        const numberedListNumberTag = new Gtk.TextTag({
-            name: 'numbered-list-number',
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.5),
-        });
-        tagTable.add(numberedListNumberTag);
-        
-        // Numbered list line margins: persistent margins for main numbered items
-        const numberedListMarginTag = new Gtk.TextTag({
-            name: 'numbered-list-margin',
-            pixels_above_lines: 1,  // Margin above main numbered items
-            pixels_below_lines: 1,  // Margin below main numbered items
-        });
-        tagTable.add(numberedListMarginTag);
-        
-        // Sub-numbered list line margins: persistent margins for indented numbered items
-        const subNumberedListMarginTag = new Gtk.TextTag({
-            name: 'sub-numbered-list-margin',
-            pixels_above_lines: 1,  // Margin above sub-numbered items
-            pixels_below_lines: 1,  // Margin below sub-numbered items
-        });
-        tagTable.add(subNumberedListMarginTag);
-        
-        // Todo checkboxes: [ ] and [X]
-        // Style to create a box appearance - when cursor is outside, only middle character visible
-        const todoUncheckedTag = new Gtk.TextTag({
-            name: 'todo-unchecked',
-            foreground: this.colors.cyan,
-            background: this._lightenColor(this.colors.background, 12),
-            scale: 0.7,  // Smaller font to create room at top and bottom
-            weight: 400,
-            family: 'monospace',  // Monospace for consistent box appearance
-            pixels_above_lines: 3,  // Add padding at top
-            pixels_below_lines: 0,  // Add padding at bottom
-            letter_spacing: 4000,  // Add horizontal spacing (in Pango units: 1024 = 1pt, so 4096 = 4pt)
-        });
-        tagTable.add(todoUncheckedTag);
-        
-        const todoCheckedTag = new Gtk.TextTag({
-            name: 'todo-checked',
-            foreground: this.colors.green,  // Keep foreground green for the X character
-            background: this.colors.green,  // Use green as background to create a filled box appearance
-            scale: 0.7,  // Smaller font to create room at top and bottom
-            weight: 700,  // Bold for checked items  
-            family: 'monospace',  // Monospace for consistent box appearance
-            pixels_above_lines: 3,  // Add padding at top
-            pixels_below_lines: 0,  // Add padding at bottom
-            letter_spacing: 4000,  // Add horizontal spacing (in Pango units: 1024 = 1pt, so 4096 = 4pt)
-        });
-        tagTable.add(todoCheckedTag);
-        
-        // Tags for when cursor is inside (no background)
-        const todoUncheckedInsideTag = new Gtk.TextTag({
-            name: 'todo-unchecked-inside',
-            foreground: this.colors.cyan,
-            scale: 1.2,
-            weight: 400,
-            family: 'monospace',
-        });
-        tagTable.add(todoUncheckedInsideTag);
-        
-        const todoCheckedInsideTag = new Gtk.TextTag({
-            name: 'todo-checked-inside',
-            foreground: this.colors.green,
-            scale: 1.2,
-            weight: 400,
-            family: 'monospace',
-        });
-        tagTable.add(todoCheckedInsideTag);
-        
-        // Tag for checked todo text (strikethrough and dimmed)
-        const todoCheckedTextTag = new Gtk.TextTag({
-            name: 'todo-checked-text',
-            strikethrough: true,
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.3),
-        });
-        tagTable.add(todoCheckedTextTag);
-        
-        // Dim tag for markdown syntax (when cursor is inside)
-        const dimTag = new Gtk.TextTag({
-            name: 'dim',
-            foreground: this.colors.cyan,
-            scale: 0.8,
-        });
-        tagTable.add(dimTag);
-        
-        // Dim tags for each heading level (matching header scale)
-        for (let i = 1; i <= 6; i++) {
-            const dimHeadingTag = new Gtk.TextTag({
-                name: `dim-h${i}`,
-                foreground: this.colors.cyan,
-                scale: scales[i-1],
-                family: 'pxlxxl',
-            });
-            tagTable.add(dimHeadingTag);
-        }
-        
-        // Pango inserts a hyphen when it has to break inside a long word
-        // (URLs, identifiers); that would misrepresent the note's text.
-        // This tag is applied to the whole buffer and never removed.
-        if (!tagTable.lookup('no-hyphens')) {
-            tagTable.add(new Gtk.TextTag({ name: 'no-hyphens', insert_hyphens: false }));
-        }
-        
-        // Invisible tag for markdown syntax (when cursor is outside)
-        const invisibleTag = new Gtk.TextTag({
-            name: 'invisible',
-            foreground: this.colors.background,
-            scale: 0.01,
-        });
-        tagTable.add(invisibleTag);
-        
-        // Table tags
-        const tablePipeTag = new Gtk.TextTag({
-            name: 'table-pipe',
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.25),
-        });
-        tagTable.add(tablePipeTag);
-        
-        const tableSeparatorTag = new Gtk.TextTag({
-            name: 'table-separator',
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.25),
-        });
-        tagTable.add(tableSeparatorTag);
-        
-        const tableHeaderTag = new Gtk.TextTag({
-            name: 'table-header',
-            weight: 700,
-            foreground: this.colors.blue,
-        });
-        tagTable.add(tableHeaderTag);
-        
-        const tableCellTag = new Gtk.TextTag({
-            name: 'table-cell',
-        });
-        tagTable.add(tableCellTag);
-        
-        // Search highlight tags
-        const searchHighlightTag = new Gtk.TextTag({
-            name: 'search-highlight',
-            background_rgba: this._colorWithOpacity(this.colors.yellow, 0.3),
-        });
-        tagTable.add(searchHighlightTag);
-        
-        const searchCurrentTag = new Gtk.TextTag({
-            name: 'search-current',
-            background_rgba: this._colorWithOpacity(this.colors.blue, 0.5),
-        });
-        tagTable.add(searchCurrentTag);
-        
-        // Horizontal rule: full-width line (when cursor is away)
-        const hrLineTag = new Gtk.TextTag({
-            name: 'hr-line',
-            foreground: this.colors.background, // Make text invisible by matching background
-            strikethrough: true,
-            strikethrough_rgba: this._colorWithOpacity(this.colors.foreground, 0.3), // Visible line through the middle
-        });
-        tagTable.add(hrLineTag);
-        
-        // Horizontal rule: dim dashes (when cursor is on line)
-        const hrLineDimTag = new Gtk.TextTag({
-            name: 'hr-line-dim',
-            foreground_rgba: this._colorWithOpacity(this.colors.foreground, 0.4),
-        });
-        tagTable.add(hrLineDimTag);
-    }
-    
-    _setupSignals() {
-        // Update on text changes with debouncing (50ms delay, or immediate for headers/undo/redo)
-        this.buffer.connect('changed', () => {
-            if (!this.updating) {
-                // Mark that text just changed to prevent cursor flicker
-                this._textJustChanged = true;
-                
-                // Check if cursor is on a header line
-                const cursor = this.buffer.get_insert();
-                const cursorIter = this.buffer.get_iter_at_mark(cursor);
-                const lineStart = cursorIter.copy();
-                lineStart.set_line_offset(0);
-                const lineEnd = cursorIter.copy();
-                if (!lineEnd.ends_line()) {
-                    lineEnd.forward_to_line_end();
-                }
-                const lineText = this.buffer.get_text(lineStart, lineEnd, false);
-                const isHeader = /^#{1,}\s+/.test(lineText);
-                
-                // Cancel previous timeout if exists
-                if (this._renderTimeoutId) {
-                    GLib.source_remove(this._renderTimeoutId);
-                }
-                
-                // Render immediately for headers or undo/redo operations
-                if (isHeader || this._isUndoRedoOperation) {
-                    // For headers and undo/redo, render immediately
-                    this._updateSyntaxVisibility();
-                    this._renderTimeoutId = null;
-                    
-                    // Reset undo/redo flag after a small delay to handle multiple buffer changes
-                    if (this._isUndoRedoOperation) {
-                        // Cancel any existing reset timeout
-                        if (this._undoRedoResetTimeoutId) {
-                            GLib.source_remove(this._undoRedoResetTimeoutId);
-                        }
-                        // Use a small delay in case the undo/redo triggers multiple changes
-                        this._undoRedoResetTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
-                            this._isUndoRedoOperation = false;
-                            this._undoRedoResetTimeoutId = null;
-                            return false;
-                        });
-                    }
-                    
-                    // Reset the flag after a short delay to allow cursor updates again
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
-                        this._textJustChanged = false;
-                        return false;
-                    });
-                } else {
-                    // For other content, use debouncing
-                    this._renderTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 50, () => {
-                        this._updateSyntaxVisibility();
-                        this._renderTimeoutId = null;
-                        // Reset the flag after a short delay to allow cursor updates again
-                        GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 100, () => {
-                            this._textJustChanged = false;
-                            return false;
-                        });
-                        return false;
-                    });
-                }
-            }
-        });
-        
-        // Update on cursor movement to show/hide syntax with debouncing (30ms delay)
-        this.buffer.connect('notify::cursor-position', () => {
-            if (!this.updating && !this._textJustChanged && !this._searchMode) {
-                // Check if there's an active selection - if so, skip re-rendering
-                const [hasSelection] = this.buffer.get_selection_bounds();
-                if (hasSelection) {
-                    return; // Skip re-rendering during selection
-                }
-                
-                // Cancel previous timeout if exists
-                if (this._cursorTimeoutId) {
-                    GLib.source_remove(this._cursorTimeoutId);
-                }
-                // Schedule new cursor update
-                this._cursorTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
-                    this._adjustCursorPosition();
-                    this._updateSyntaxVisibility();
-                    this._cursorTimeoutId = null;
-                    return false;
-                });
-            }
-        });
-        
-        // Re-render markdown when selection is cleared/completed
-        this.buffer.connect('mark-set', (buffer, iter, mark) => {
-            // Only care about the selection bound mark
-            if (mark === buffer.get_selection_bound()) {
-                const [hasSelection] = buffer.get_selection_bounds();
-                if (!hasSelection && !this.updating && !this._textJustChanged) {
-                    // Selection was just cleared - schedule a re-render
-                    if (this._cursorTimeoutId) {
-                        GLib.source_remove(this._cursorTimeoutId);
-                    }
-                    this._cursorTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, 30, () => {
-                        this._adjustCursorPosition();
-                        this._updateSyntaxVisibility();
-                        this._cursorTimeoutId = null;
-                        return false;
-                    });
-                }
-            }
-        });
-    }
-    
+
+    // Theme change: update tag colours in place (no re-tagging needed)
     updateColors(colors) {
-        this.colors = colors;
-        this._initTags();
-        this._applyMarkdown();
+        this.colors = colors || {};
+        const specs = this._tagSpecs();
+        for (const [name, props] of specs) {
+            const tag = this._table.lookup(name);
+            if (tag && this._ownTags.has(tag)) this._updateTagProps(tag, props);
+        }
+        this._applyViewColors();
+        this._refreshMetrics();
     }
-    
-    // Helper to apply tag and track it (Optimization #1)
-    _applyTag(tagName, start, end) {
-        this.buffer.apply_tag_by_name(tagName, start, end);
-        this._appliedTags.add(tagName);
+
+    // Zoom / font size change (CSS font-size in pixels). Heading and other
+    // relative sizes follow automatically; list hanging indents are
+    // re-measured and updated in place.
+    setZoom(fontSizePx) {
+        this._fontPx = fontSizePx > 0 ? fontSizePx : 0;
+        this._refreshMetrics();
     }
-    
-    // Get or create a paragraph indent tag for a list line.
-    //   extraIndent: extra left margin so nested markers line up under the
-    //                parent's content (0 for top-level items)
-    //   prefixWidth: rendered width of indentation + marker (+ checkbox), used
-    //                as a hanging indent so wrapped lines align with the text
-    _getListIndentTag(extraIndent, prefixWidth) {
-        const cacheKey = `${extraIndent}-${prefixWidth}`;
-        if (this._indentTagCache.has(cacheKey)) {
-            return this._indentTagCache.get(cacheKey);
-        }
-        
-        const tagTable = this.buffer.get_tag_table();
-        const tagName = `list-indent-${cacheKey}`;
-        
-        let tag = tagTable.lookup(tagName);
-        if (!tag) {
-            // Pango hanging indent: a negative indent leaves the first line at the
-            // paragraph's left margin and indents only the wrapped lines by |indent|.
-            //   first line starts at page margin + extraIndent ("  - [ ] Item")
-            //   wrapped lines start at page margin + extraIndent + prefixWidth
-            //   (aligned with "Item")
-            const props = { name: tagName, indent: -prefixWidth };
-            if (extraIndent > 0) {
-                // A tag's left_margin replaces the text view's own margin rather
-                // than adding to it, so include the view margin explicitly.
-                props.left_margin = this.textView.get_left_margin() + extraIndent;
-            }
-            tag = new Gtk.TextTag(props);
-            tagTable.add(tag);
-        }
-        
-        this._indentTagCache.set(cacheKey, tagName);
-        return tagName;
+
+    // Whether a line is part of a fenced code block (including fence lines)
+    isInCodeBlock(lineNumber) {
+        this._ensureClassified();
+        return FENCE_KINDS.has(this._kinds[lineNumber]);
     }
-    
-    // Apply paragraph indentation to a list line.
-    //   item.indentLen   number of leading whitespace characters
-    //   item.markerLen   length of the marker including its trailing space ("- ", "1. ")
-    //   item.contentIdx  index into the line where the item's text starts
-    //                    (after any todo checkbox)
-    //   item.levelIndent when true, each leading space is rendered one marker
-    //                    width wide so a nested marker sits under the parent's
-    //                    first content character (bullets nest one space per
-    //                    level; numbered lists already use marker-width spacing)
-    // Widths are measured from the text view's real layout, so they reflect
-    // every tag already applied to the line (font size/zoom, checkbox scaling,
-    // letter spacing, hidden brackets). Call after all other line tags.
-    _applyListIndent(lineOffset, item) {
-        const lineStart = this.buffer.get_iter_at_offset(lineOffset);
-        const contentIter = this.buffer.get_iter_at_offset(lineOffset + item.contentIdx);
-        
-        // Use iters for the line end: JS string lengths count UTF-16 units, so
-        // emoji in the line would push an offset-based end into the next line
-        // (and paragraph attributes like indent would leak onto it).
-        const lineEnd = lineStart.copy();
-        if (!lineEnd.ends_line()) {
-            lineEnd.forward_to_line_end();
-        }
-        
-        const startRect = this.textView.get_iter_location(lineStart);
-        const contentRect = this.textView.get_iter_location(contentIter);
-        
-        // All measured positions are on the first visual line, so differences
-        // are rendered widths regardless of any margin currently applied.
-        if (contentRect.y !== startRect.y) return;
-        const prefixWidth = Math.round(contentRect.x - startRect.x);
-        if (prefixWidth <= 0) return;
-        
-        let extraIndent = 0;
-        if (item.levelIndent && item.indentLen > 0) {
-            const markerStart = this.buffer.get_iter_at_offset(lineOffset + item.indentLen);
-            const markerEnd = this.buffer.get_iter_at_offset(lineOffset + item.indentLen + item.markerLen);
-            const markerStartX = this.textView.get_iter_location(markerStart).x;
-            const markerEndX = this.textView.get_iter_location(markerEnd).x;
-            const spacesWidth = markerStartX - startRect.x;
-            const markerWidth = markerEndX - markerStartX;
-            // Make the leading spaces occupy one marker width per level
-            extraIndent = Math.max(0, Math.round(item.indentLen * markerWidth - spacesWidth));
-        }
-        
-        this._applyTag(this._getListIndentTag(extraIndent, prefixWidth), lineStart, lineEnd);
+
+    // Whether the character at iter belongs to an inline code span
+    // (including its backticks)
+    isInCodeSpan(iter) {
+        const model = this._modelAt(iter.get_line());
+        if (!model) return false;
+        const col = iter.get_line_offset();
+        return model.codeSpans.some(c => col >= c.s && col < c.e);
     }
-    
-    _adjustCursorPosition() {
-        if (this.updating) return;
-        
-        const cursor = this.buffer.get_insert();
-        const cursorIter = this.buffer.get_iter_at_mark(cursor);
-        const cursorOffset = cursorIter.get_offset();
-        
-        // Track movement direction
-        const movingForward = cursorOffset > this.lastCursorPosition;
-        const movingBackward = cursorOffset < this.lastCursorPosition;
-        const lastPos = this.lastCursorPosition;
-        
-        // Save previous position before updating for arrow direction tracking
-        this._previousCursorPosition = this.lastCursorPosition;
-        this.lastCursorPosition = cursorOffset;
-        
-        // Don't adjust if we just adjusted or if cursor hasn't moved
-        if (lastPos === -1 || cursorOffset === lastPos) {
-            return;
-        }
-        
-        const [start, end] = this.buffer.get_bounds();
-        const text = this.buffer.get_text(start, end, false);
-        
-        // Check if we're on a markdown syntax character and need to adjust
-        const adjustment = this._findCursorAdjustment(text, cursorOffset, movingForward);
-        
-        // Only adjust if:
-        // 1. There's an adjustment to make
-        // 2. We're moving in a direction that makes sense (not trying to exit)
-        if (adjustment !== 0) {
-            // Don't adjust if we're trying to move backward but adjustment wants us forward
-            if (movingBackward && adjustment > 0) {
-                return;
-            }
-            // Don't adjust if we're trying to move forward but adjustment wants us backward
-            if (movingForward && adjustment < 0) {
-                return;
-            }
-            
-            this.updating = true;
-            const newIter = this.buffer.get_iter_at_offset(cursorOffset + adjustment);
-            this.buffer.place_cursor(newIter);
-            this.lastCursorPosition = cursorOffset + adjustment;
-            this.updating = false;
-        }
+
+    // URL of the link (inline link, image, <autolink> or bare URL) whose
+    // source text contains iter, or null
+    getLinkAtIter(iter) {
+        const model = this._modelAt(iter.get_line());
+        if (!model) return null;
+        const col = iter.get_line_offset();
+        const link = model.links.find(l => col >= l.s && col < l.e);
+        return link && link.url ? link.url : null;
     }
-    
-    _findCursorAdjustment(text, cursorOffset, movingForward) {
-        const lines = text.split('\n');
-        let lineStart = 0;
-        
-        for (const line of lines) {
-            const lineEnd = lineStart + line.length;
-            
-            if (cursorOffset >= lineStart && cursorOffset <= lineEnd) {
-                const posInLine = cursorOffset - lineStart;
-                
-                // Check inline patterns: bold, italic, code, strikethrough, underline, links, todos
-                const patterns = [
-                    { regex: /`([^`]+?)`/g, openLen: 1, closeLen: 1 },           // code
-                    { regex: /(\*\*|__)(.+?)\1/g, openLen: 2, closeLen: 2 },    // bold
-                    { regex: /\*([^\*]+?)\*/g, openLen: 1, closeLen: 1 },       // italic *
-                    { regex: /_([^_]+?)_/g, openLen: 1, closeLen: 1 },          // italic _
-                    { regex: /~~(.+?)~~/g, openLen: 2, closeLen: 2 },           // strikethrough
-                    { regex: /\+\+(.+?)\+\+/g, openLen: 2, closeLen: 2 },       // underline
-                    { regex: /\[([ Xx])\]/g, openLen: 1, closeLen: 1 },         // todos
-                    { regex: /\[(.+?)\]\((.+?)\)/g, openLen: 1, closeLen: 0 },  // links (special)
-                ];
-                
-                for (const pattern of patterns) {
-                    let match;
-                    pattern.regex.lastIndex = 0;
-                    
-                    while ((match = pattern.regex.exec(line)) !== null) {
-                        const matchStart = match.index;
-                        const matchEnd = matchStart + match[0].length;
-                        
-                        // Special handling for links (they have 2 capture groups)
-                        if (pattern.regex.source.includes('\\[') && match[2] !== undefined) {
-                            const textStart = matchStart + 1;
-                            const textEnd = textStart + match[1].length;
-                            const urlStart = textEnd + 2;
-                            const urlEnd = urlStart + match[2].length;
-                            
-                            // Only adjust if exactly on opening bracket when moving forward
-                            if (posInLine === matchStart && movingForward) {
-                                return textStart - posInLine;
-                            }
-                            // If on ]( characters, jump to url start
-                            if ((posInLine === textEnd || posInLine === textEnd + 1) && movingForward) {
-                                return urlStart - posInLine;
-                            }
-                        } else {
-                            const contentStart = matchStart + pattern.openLen;
-                            const contentEnd = matchEnd - pattern.closeLen;
-                            
-                            // Only adjust when landing exactly on opening/closing syntax
-                            if (posInLine >= matchStart && posInLine < contentStart) {
-                                // On opening syntax, only jump forward if moving forward
-                                if (movingForward) {
-                                    return contentStart - posInLine;
-                                }
-                            } else if (posInLine > contentEnd && posInLine <= matchEnd) {
-                                // On closing syntax, only jump backward if moving backward
-                                if (!movingForward) {
-                                    return contentEnd - posInLine;
-                                }
-                            }
-                        }
-                    }
+
+    destroy() {
+        if (this._destroyed) return;
+        this._destroyed = true;
+        for (const id of this._handlers) this.buffer.disconnect(id);
+        this._handlers = [];
+        if (this._flushId) GLib.source_remove(this._flushId);
+        if (this._chunkId) GLib.source_remove(this._chunkId);
+        if (this._tickId) this.textView.remove_tick_callback(this._tickId);
+        this._flushId = this._chunkId = this._tickId = 0;
+        this.textView.bulletColor = null;
+        this.textView.arrowColor = null;
+    }
+
+    // ------------------------------------------------------------------
+    // Tags
+    // ------------------------------------------------------------------
+
+    // Static tags in priority order (lowest first). Lazily created heading
+    // gradient tags are inserted just below 'gradient-anchor'.
+    _tagSpecs() {
+        const c = this.colors;
+        const fg = c.foreground || '#ffffff';
+        const bg = c.background || '#000000';
+        const transparent = rgba(fg, 1 / 65535); // Pango treats alpha 0 as unset
+        const specs = [
+            ['no-hyphens', { insert_hyphens: false }],
+            ['list-item', { pixels_above_lines: 1, pixels_below_lines: 1 }],
+            ['code-block', {
+                family: 'monospace', foreground: c.red || fg,
+                paragraph_background: lighten(bg, 8), scale: 0.95, weight: 500,
+            }],
+            ['comment', { foreground_rgba: rgba(fg, 0.45) }],
+            ['blockquote', { style: Pango.Style.ITALIC, foreground_rgba: rgba(fg, 0.75) }],
+            ['quote-marker', { foreground: c.cyan || fg, weight: 700 }],
+            ['bold', { weight: 700 }],
+            ['italic', { style: Pango.Style.ITALIC }],
+            ['strikethrough', { strikethrough: true }],
+            ['link', { foreground: c.blue || fg, underline: Pango.Underline.SINGLE }],
+            ['link-url', { foreground: c.magenta || fg, scale: 0.85 }],
+            ['code', {
+                family: 'monospace', foreground: c.red || fg, background: lighten(bg, 8),
+                scale: 0.95, weight: 500, rise: -200,
+            }],
+            ['todo-checked-text', { strikethrough: true, foreground_rgba: rgba(fg, 0.3) }],
+            ['bullet-dash', { foreground_rgba: rgba(fg, 0.5) }],
+            ['numbered-list-number', { foreground_rgba: rgba(fg, 0.5) }],
+        ];
+        for (let i = 1; i <= 6; i++)
+            specs.push([`emoji-h${i}`, { scale: HEADING_SCALES[i - 1] * EMOJI_HEADING_FACTOR, weight: 400 }]);
+        specs.push(['gradient-anchor', {}]);
+        specs.push(
+            ['todo-unchecked', {
+                foreground: c.cyan || fg, background: lighten(bg, 12), scale: 0.7, weight: 400,
+                family: 'monospace', pixels_above_lines: 3, pixels_below_lines: 0, letter_spacing: 4000,
+            }],
+            ['todo-checked', {
+                foreground: c.green || fg, background: c.green || fg, scale: 0.7, weight: 700,
+                family: 'monospace', pixels_above_lines: 3, pixels_below_lines: 0, letter_spacing: 4000,
+            }],
+            ['todo-unchecked-inside', { foreground: c.cyan || fg, scale: 1.2, weight: 400, family: 'monospace' }],
+            ['todo-checked-inside', { foreground: c.green || fg, scale: 1.2, weight: 400, family: 'monospace' }],
+            ['bullet-star', { foreground_rgba: transparent }],
+            ['bullet-star-near', { foreground: c.cyan || fg }],
+            ['dim', { foreground: c.cyan || fg, scale: 0.8 }],
+        );
+        for (let i = 1; i <= 6; i++)
+            specs.push([`dim-h${i}`, { foreground: c.cyan || fg, scale: HEADING_SCALES[i - 1], family: 'pxlxxl' }]);
+        specs.push(
+            ['invisible', { foreground_rgba: transparent, scale: 0.01 }],
+            ['hr-line', {
+                foreground_rgba: transparent, strikethrough: true,
+                strikethrough_rgba: rgba(fg, 0.3),
+            }],
+            ['hr-line-dim', { foreground_rgba: rgba(fg, 0.4) }],
+            ['arrow', { foreground_rgba: transparent }],
+        );
+        return specs;
+    }
+
+    // Remove tags left behind by a previous renderer on the same buffer
+    _removeStaleTags() {
+        const names = new Set(this._tagSpecs().map(([name]) => name));
+        const stale = [];
+        this._table.foreach(tag => {
+            const name = tag.name || '';
+            if (names.has(name) || name.startsWith('gradient-') || name.startsWith('md-indent-'))
+                stale.push(tag);
+        });
+        for (const tag of stale) this._table.remove(tag);
+    }
+
+    _createStaticTags() {
+        for (const [name, props] of this._tagSpecs()) {
+            const tag = new Gtk.TextTag(Object.assign({ name }, props));
+            this._table.add(tag);
+            this._ownTags.add(tag);
+            this._tagProps.set(tag, this._propKeys(props));
+        }
+        this._anchorTag = this._table.lookup('gradient-anchor');
+    }
+
+    _propKeys(props) {
+        const out = {};
+        for (const [k, v] of Object.entries(props))
+            out[k] = v instanceof Gdk.RGBA ? v.to_string() : v;
+        return out;
+    }
+
+    _updateTagProps(tag, props) {
+        const old = this._tagProps.get(tag) || {};
+        const keys = this._propKeys(props);
+        for (const [k, v] of Object.entries(props)) {
+            if (old[k] !== keys[k]) tag[k] = v;
+        }
+        this._tagProps.set(tag, keys);
+    }
+
+    _applyViewColors() {
+        const fg = this.colors.foreground || '#ffffff';
+        this.textView.bulletColor = rgba(fg, 0.35);
+        this.textView.arrowColor = rgba(fg, 1);
+        this.textView.queue_draw();
+    }
+
+    _gradientTag(moodIndex, level, step) {
+        const mood = this._moods[moodIndex];
+        const name = `gradient-${mood.name}-h${level}-${step}`;
+        const entry = this._gradientTags.get(name);
+        if (entry) return entry.tag;
+        const tag = new Gtk.TextTag({
+            name,
+            scale: HEADING_SCALES[level - 1],
+            weight: 400,
+            family: 'pxlxxl',
+            foreground: mood.gradient[step],
+        });
+        this._table.add(tag);
+        tag.set_priority(this._anchorTag.get_priority());
+        this._gradientTags.set(name, { tag, mood: mood.name });
+        this._ownTags.add(tag);
+        return tag;
+    }
+
+    // Whether a heading character needs the reduced fallback scale: the
+    // pixel heading font only covers Latin text, glyphs it lacks (emoji,
+    // CJK, ...) come from much taller fallback fonts.
+    _needsFallbackScale(ch) {
+        let r = this._fallbackCache.get(ch);
+        if (r !== undefined) return r;
+        const cp = ch.codePointAt(0);
+        if (isEmoji(cp)) {
+            r = true;
+        } else {
+            if (this._headerFont === undefined) {
+                try {
+                    const desc = Pango.FontDescription.from_string('pxlxxl');
+                    this._headerFont = this.textView.get_pango_context().load_font(desc);
+                } catch (e) {
+                    this._headerFont = null;
                 }
-                
-                // Check for headers at line start - only when moving forward
-                const headerMatch = line.match(/^(#{1,6})(\s+)(.+)$/);
-                if (headerMatch && posInLine <= headerMatch[1].length && movingForward) {
-                    // Jump past the hashes and all spaces
-                    return (headerMatch[1].length + headerMatch[2].length) - posInLine;
-                }
-                
-                // Check for code block markers - skip over them when moving forward
-                const codeBlockMatch = line.match(/^```/);
-                if (codeBlockMatch && posInLine < 3 && movingForward) {
-                    // Jump past the backticks and to the next line
-                    return (line.length + 1) - posInLine;
-                }
-                
+            }
+            r = this._headerFont ? !this._headerFont.has_char(String.fromCodePoint(cp)) : false;
+        }
+        this._fallbackCache.set(ch, r);
+        return r;
+    }
+
+    // ------------------------------------------------------------------
+    // List hanging indents
+    // ------------------------------------------------------------------
+
+    _baseFontDescription() {
+        const desc = this.textView.get_pango_context().get_font_description().copy();
+        if (this.colors.font) desc.set_family(`${this.colors.font},monospace`);
+        if (this._fontPx) desc.set_absolute_size(this._fontPx * Pango.SCALE);
+        return desc;
+    }
+
+    // Rendered width in pixels of a line prefix (indentation, quote and list
+    // markers, task box) using the same scales/spacing as the applied tags
+    _measurePrefix(text, box, checked, revealed) {
+        const layout = Pango.Layout.new(this.textView.get_pango_context());
+        layout.set_font_description(this._baseFontDescription());
+        layout.set_text(text, -1);
+        if (box >= 0) {
+            const attrs = new Pango.AttrList();
+            const add = (attr, s, e) => {
+                attr.start_index = s;
+                attr.end_index = e;
+                attrs.insert(attr);
+            };
+            add(Pango.attr_family_new('monospace'), box, box + 3);
+            if (revealed) {
+                add(Pango.attr_scale_new(1.2 * 0.8), box, box + 3);
+            } else {
+                add(Pango.attr_scale_new(0.7 * 0.01), box, box + 1);
+                add(Pango.attr_scale_new(0.7), box + 1, box + 2);
+                add(Pango.attr_scale_new(0.7 * 0.01), box + 2, box + 3);
+                add(Pango.attr_letter_spacing_new(4000), box, box + 3);
+                add(Pango.attr_weight_new(checked ? 700 : 400), box, box + 3);
+            }
+            layout.set_attributes(attrs);
+        }
+        const [width] = layout.get_pixel_size();
+        return width;
+    }
+
+    _indentTag(prefix, checked, revealed) {
+        const key = `${prefix.text}\u0001${prefix.box}${checked ? 'x' : ''}${revealed ? 'r' : ''}`;
+        let entry = this._indentTags.get(key);
+        if (!entry) {
+            if (this._indentTags.size >= MAX_INDENT_TAGS) return null;
+            const tag = new Gtk.TextTag({ name: `md-indent-${this._indentSeq++}` });
+            this._table.add(tag);
+            this._ownTags.add(tag);
+            entry = { tag, gen: -1, text: prefix.text, box: prefix.box, checked, revealed };
+            this._indentTags.set(key, entry);
+        }
+        if (entry.gen !== this._metricsGen) this._updateIndent(entry);
+        return entry.tag;
+    }
+
+    _updateIndent(entry) {
+        const width = this._measurePrefix(entry.text, entry.box, entry.checked, entry.revealed);
+        // Negative indent = hanging indent: the first line starts at the
+        // margin, wrapped lines are indented to the item's content.
+        if (entry.tag.indent !== -width) entry.tag.indent = -width;
+        entry.gen = this._metricsGen;
+    }
+
+    // Re-measure all hanging indents now, and again after the next frame
+    // in case the new CSS font is applied lazily.
+    _refreshMetrics() {
+        this._metricsGen++;
+        for (const entry of this._indentTags.values()) this._updateIndent(entry);
+        if (!this._tickId && !this._destroyed) {
+            let frames = 0;
+            this._tickId = this.textView.add_tick_callback(() => {
+                if (++frames < 2) return GLib.SOURCE_CONTINUE;
+                this._tickId = 0;
+                this._metricsGen++;
+                for (const entry of this._indentTags.values()) this._updateIndent(entry);
+                return GLib.SOURCE_REMOVE;
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Edit tracking
+    // ------------------------------------------------------------------
+
+    _beginEdit(line) {
+        this._applyPendingEdit();
+        this._pendingEdit = { line, count: this.buffer.get_line_count() };
+    }
+
+    _applyPendingEdit() {
+        const p = this._pendingEdit;
+        if (!p) return;
+        this._pendingEdit = null;
+        const L = p.line;
+        const delta = this.buffer.get_line_count() - p.count;
+        if (delta > 0) {
+            const add = (arr, fill) => {
+                const extra = new Array(delta);
+                for (let k = 0; k < delta; k++) extra[k] = fill();
+                return arr.slice(0, L + 1).concat(extra, arr.slice(L + 1));
+            };
+            // Inserted text can inherit the split line's tags
+            const inherited = [...(this._lineTags[L] || [])];
+            this._texts = add(this._texts, () => null);
+            this._kinds = add(this._kinds, () => -1);
+            this._fenceOut = add(this._fenceOut, () => '');
+            this._dirty = add(this._dirty, () => DIRTY_TEXT);
+            this._lineTags = add(this._lineTags, () => inherited.slice());
+        } else if (delta < 0) {
+            // Joined lines keep the tags of every line merged into L
+            const merged = new Set(this._lineTags[L] || []);
+            for (let k = L + 1; k <= L - delta && k < this._lineTags.length; k++)
+                for (const tag of this._lineTags[k] || []) merged.add(tag);
+            this._lineTags[L] = [...merged];
+            for (const arr of [this._texts, this._kinds, this._fenceOut, this._dirty, this._lineTags])
+                arr.splice(L + 1, -delta);
+        }
+        const shift = (v) => (v > L ? Math.max(L, v + delta) : v);
+        if (delta !== 0) {
+            this._clsLo = shift(this._clsLo);
+            this._clsHi = shift(this._clsHi);
+            this._tagLo = shift(this._tagLo);
+            this._tagHi = shift(this._tagHi);
+            const lines = new Set();
+            for (const l of this._reveal.lines) lines.add(shift(l));
+            this._reveal.lines = lines;
+            this._reveal.line = shift(this._reveal.line);
+            if (this._carryFrom > L) this._carryFrom = Math.max(L + 1, this._carryFrom + delta);
+        }
+        for (let i = L; i <= L + Math.max(0, delta); i++) this._markText(i);
+        this._scheduleFlush();
+    }
+
+    _markText(i) {
+        if (i < 0 || i >= this._dirty.length) return;
+        this._dirty[i] = DIRTY_TEXT;
+        if (i < this._clsLo) this._clsLo = i;
+        if (i > this._clsHi) this._clsHi = i;
+        if (i < this._tagLo) this._tagLo = i;
+        if (i > this._tagHi) this._tagHi = i;
+    }
+
+    _markTag(i) {
+        if (i < 0 || i >= this._dirty.length) return;
+        if (this._dirty[i] === DIRTY_NONE) this._dirty[i] = DIRTY_TAG;
+        if (i < this._tagLo) this._tagLo = i;
+        if (i > this._tagHi) this._tagHi = i;
+    }
+
+    // ------------------------------------------------------------------
+    // Line access
+    // ------------------------------------------------------------------
+
+    _iterAtLine(i) {
+        const r = this.buffer.get_iter_at_line(i);
+        return Array.isArray(r) ? r[1] : r;
+    }
+
+    _lineEndIter(start) {
+        const end = start.copy();
+        if (!end.ends_line()) end.forward_to_line_end();
+        return end;
+    }
+
+    _readLines(a, b) {
+        const start = this._iterAtLine(a);
+        const end = this._lineEndIter(this._iterAtLine(b));
+        const parts = Parser.splitLines(this.buffer.get_text(start, end, true));
+        for (let i = a; i <= b; i++) {
+            if (this._dirty[i] === DIRTY_TEXT || this._texts[i] === null)
+                this._texts[i] = parts[i - a] !== undefined ? parts[i - a] : '';
+        }
+    }
+
+    _readLine(i) {
+        const start = this._iterAtLine(i);
+        this._texts[i] = this.buffer.get_text(start, this._lineEndIter(start), true);
+    }
+
+    _ensureClassified() {
+        this._applyPendingEdit();
+        if (this._clsLo <= this._clsHi) this._classify();
+    }
+
+    _modelAt(line) {
+        this._ensureClassified();
+        if (line < 0 || line >= this._texts.length) return null;
+        const kind = this._kinds[line];
+        if (kind !== Kind.TEXT && kind !== Kind.HEADING) return null;
+        // Cache the last parsed line: getLinkAtIter runs on every pointer
+        // motion while Ctrl is held
+        const text = this._texts[line];
+        const fenceIn = line > 0 ? this._fenceOut[line - 1] : '';
+        const c = this._modelCache;
+        if (c && c.text === text && c.fenceIn === fenceIn) return c.model;
+        const model = Parser.parseLine(text, fenceIn);
+        this._modelCache = { text, fenceIn, model };
+        return model;
+    }
+
+    // Opening fence line of the block containing line i, or -1
+    _fenceOpenFor(i) {
+        if (!FENCE_KINDS.has(this._kinds[i])) return -1;
+        while (i > 0 && this._kinds[i] !== Kind.FENCE_OPEN) i--;
+        return this._kinds[i] === Kind.FENCE_OPEN ? i : -1;
+    }
+
+    // Closing fence line of the block opened at line o, or -1 if unclosed
+    _fenceCloseFor(o) {
+        const n = this._kinds.length;
+        let i = o + 1;
+        while (i < n && this._kinds[i] === Kind.CODE) i++;
+        return i < n && this._kinds[i] === Kind.FENCE_CLOSE ? i : -1;
+    }
+
+    // ------------------------------------------------------------------
+    // Classification (pure JS, cheap): re-parse dirty lines' block state
+    // and cascade while the fence state differs from before.
+    // ------------------------------------------------------------------
+
+    // Classify pending lines, continuing past the dirty range while the
+    // fence state differs from before. Stops after line stopAt (the rest is
+    // continued by a later call, see _carryFrom).
+    _classify(stopAt = Infinity) {
+        const n = this._texts.length;
+        const lo = Math.max(0, this._clsLo);
+        const hi = Math.min(n - 1, this._clsHi);
+        const carryFrom = this._carryFrom;
+        this._clsLo = Infinity;
+        this._clsHi = -1;
+        this._carryFrom = -1;
+        if (lo > hi) return;
+
+        const readHi = Math.min(hi, stopAt);
+        let textDirty = 0;
+        for (let i = lo; i <= readHi; i++) if (this._dirty[i] === DIRTY_TEXT) textDirty++;
+        const bulk = textDirty > 32;
+        if (bulk) this._readLines(lo, readHi);
+
+        let fenceChangeLo = -1, fenceChangeHi = -1;
+        let carry = false;
+        for (let i = lo; i < n; i++) {
+            if (i === carryFrom) carry = true;
+            const dirty = this._dirty[i] === DIRTY_TEXT;
+            if (i > hi && !carry) break;
+            if (i > stopAt) {
+                // Defer the rest; remember whether line i must be
+                // re-classified because the state above it changed
+                this._clsLo = i;
+                this._clsHi = Math.max(hi, i);
+                this._carryFrom = carry ? i : -1;
                 break;
             }
-            
-            lineStart = lineEnd + 1; // +1 for newline
+            if (!dirty && !carry && this._kinds[i] >= 0) continue;
+            if (this._texts[i] === null || (dirty && !(bulk && i <= readHi))) this._readLine(i);
+
+            const fenceIn = i > 0 ? this._fenceOut[i - 1] : '';
+            const c = Parser.classifyLine(this._texts[i], fenceIn);
+            const oldKind = this._kinds[i];
+            const oldOut = this._fenceOut[i];
+            this._kinds[i] = c.kind;
+            this._fenceOut[i] = c.fenceOut;
+            carry = c.fenceOut !== oldOut;
+
+            if (dirty || c.kind !== oldKind) {
+                this._dirty[i] = DIRTY_TAG;
+                if (i < this._tagLo) this._tagLo = i;
+                if (i > this._tagHi) this._tagHi = i;
+            }
+            if (carry || c.kind !== oldKind) {
+                if (fenceChangeLo < 0) fenceChangeLo = i;
+                fenceChangeHi = i;
+            }
         }
-        
-        return 0;
+
+        // Fence structure changed: opening fence lines render differently
+        // when their block is closed or not, and the cursor's block may
+        // have changed shape.
+        if (fenceChangeLo >= 0) {
+            const open = this._fenceOpenFor(Math.max(0, fenceChangeLo - 1));
+            if (open >= 0) this._markTag(open);
+            for (let i = fenceChangeLo; i <= fenceChangeHi; i++) {
+                if (this._kinds[i] === Kind.FENCE_OPEN) this._markTag(i);
+            }
+            this._revealValid = false;
+        }
     }
-    
-    _applyMarkdown() {
-        if (this.updating) return;
-        
-        this.updating = true;
-        const [start, end] = this.buffer.get_bounds();
-        
-        // Remove syntax tags but preserve margin tags
-        const tagsToRemove = ['bold', 'italic', 'code', 'code-block', 'strikethrough', 'underline', 'link', 'link-url', 
-         'heading1', 'heading2', 'heading3', 'heading4', 'heading5', 'heading6',
-         'emoji-h1', 'emoji-h2', 'emoji-h3', 'emoji-h4', 'emoji-h5', 'emoji-h6',
-         'dim', 'invisible', 'todo-unchecked', 'todo-checked', 'todo-checked-text', 'bullet-char', 'bullet-dash', 'bullet-star', 'bullet-star-near', 'numbered-list-number',
-         'dim-h1', 'dim-h2', 'dim-h3', 'dim-h4', 'dim-h5', 'dim-h6',
-         'table-pipe', 'table-separator', 'table-header', 'table-cell', 'hr-line', 'hr-line-dim'];
-        
-        // Add gradient background tags to removal list for all moods (including custom ones)
-        let moodNamesToRemove = ['stone', 'metal', 'fire', 'ice', 'purple', 'forest', 'sunset', 'ocean', 'lava', 'mint', 'amber', 'royal',
-                          'aurora', 'sunken', 'ghost', 'sulfur', 'velvet', 'cicada', 'lunar', 'tonic', 'cobalt', 'ectoplasm', 'polar', 'chiaroscuro',
-                          'vanta', 'toxicvelvet', 'bruise', 'bismuth', 'solar', 'ultralich', 'paradox', 'cryo', 'hazmat', 'feral'];
-        
-        // If we have existing mood names, add them to removal list
-        if (this.moodNames && this.moodNames.length > 0) {
-            moodNamesToRemove = moodNamesToRemove.concat(this.moodNames);
-        }
-        
-        // Remove duplicates
-        moodNamesToRemove = [...new Set(moodNamesToRemove)];
-        
-        for (const moodName of moodNamesToRemove) {
-            for (let level = 1; level <= 6; level++) {
-                for (let i = 0; i < 30; i++) {
-                    tagsToRemove.push(`gradient-${moodName}-h${level}-${i}`);
-                }
-            }
-        }
-        
-        // Remove only syntax tags, preserve margin tags (bullet, sub-bullet, numbered-list, sub-numbered-list)
-        tagsToRemove.forEach(tagName => {
-            const tag = this.buffer.get_tag_table().lookup(tagName);
-            if (tag) {
-                this.buffer.remove_tag(tag, start, end);
-            }
-        });
-        
-        // Remove list indent tags (they will be re-applied if needed)
-        for (const tagName of this._indentTagCache.values()) {
-            const tag = this.buffer.get_tag_table().lookup(tagName);
-            if (tag) {
-                this.buffer.remove_tag(tag, start, end);
-            }
-        }
-        
-        // Also remove any list indent tags that might exist but aren't in cache
-        const tagTable = this.buffer.get_tag_table();
-        tagTable.foreach((tag) => {
-            if (tag.name && tag.name.startsWith('list-indent-')) {
-                this.buffer.remove_tag(tag, start, end);
-            }
-        });
-        
-        this.buffer.apply_tag_by_name('no-hyphens', start, end);
-        
-        // Iterate using TextIter to get correct byte offsets (handles multi-byte chars like emojis)
-        let iter = this.buffer.get_start_iter();
-        let inCodeBlock = false;
-        let codeBlockStart = -1;
-        let lineNum = 0;
-        
-        do {
-            const lineStart = iter.copy();
-            
-            // Move to end of line
-            if (!iter.ends_line()) {
-                iter.forward_to_line_end();
-            }
-            const lineEnd = iter.copy();
-            
-            // Get line text and byte offset
-            const lineText = this.buffer.get_text(lineStart, lineEnd, false);
-            const lineOffset = lineStart.get_offset();
-            
-            // Check for code block markers
-            if (lineText.trim().startsWith('```')) {
-                if (!inCodeBlock) {
-                    // Starting a code block
-                    inCodeBlock = true;
-                    codeBlockStart = lineOffset;
-                } else {
-                    // Ending a code block
-                    const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-                    this._applyTag('code-block', blockStart, lineEnd);
-                    
-                    // Dim the backticks on start line
-                    const codeBlockStartIter = this.buffer.get_iter_at_offset(codeBlockStart);
-                    const codeBlockStartEnd = codeBlockStartIter.copy();
-                    if (!codeBlockStartEnd.ends_line()) {
-                        codeBlockStartEnd.forward_to_line_end();
-                    }
-                    this._applyTag('dim', codeBlockStartIter, codeBlockStartEnd);
-                    
-                    // Dim the backticks on end line
-                    this._applyTag('dim', lineStart, lineEnd);
-                    
-                    inCodeBlock = false;
-                    codeBlockStart = -1;
-                }
-            } else if (inCodeBlock) {
-                // Inside code block, will be styled when block ends
-            } else {
-                // Normal line processing
-                this._applyLineMarkdown(lineText, lineOffset, lineNum);
-            }
-            
-            lineNum++;
-        } while (iter.forward_line());
-        
-        // An unterminated code block extends to the end of the document
-        if (inCodeBlock) {
-            const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-            const [, bufferEnd] = this.buffer.get_bounds();
-            this._applyTag('code-block', blockStart, bufferEnd);
-        }
-        
-        this.updating = false;
+
+    _classifyPending() {
+        return this._clsLo <= this._clsHi;
     }
-    
-    _applyLineMarkdown(line, lineOffset, lineNum) {
-        line = this._toBufferIndexed(line);
-        
-        // Headers (must be at start of line), one to six hashes
-        const headerMatch = line.match(/^(#{1,6})(\s+)(.+)$/);
-        if (headerMatch) {
-            const [, hashes, spaces, content] = headerMatch;
-            const actualLevel = hashes.length; // Actual number of hashes
-            const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
-            const start = this.buffer.get_iter_at_offset(lineOffset);
-            
-            // Hide the hashes by default (will be shown when cursor is on line)
-            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + spaces.length);
-            this._applyTag('invisible', start, hashEnd);
-            
-            // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
-            const moodIndex = (actualLevel - 1) % this.moodNames.length;
-            const mood = this.moodNames[moodIndex];
-            const gradientColors = this.moodGradients[mood];
-            
-            // Apply gradient with 45-degree diagonal pattern
-            // Calculate actual content start position accounting for all spaces
-            const contentStart = lineOffset + hashes.length + spaces.length;
-            
-            // Use Array.from to properly iterate Unicode code points (handles emojis correctly)
-            const chars = Array.from(content);
-            
-            // GTK TextBuffer counts each character (including emojis) as 1 position
-            for (let i = 0; i < chars.length; i++) {
-                const char = chars[i];
-                
-                // Each character is 1 position in GTK buffer (even emojis)
-                const charStart = this.buffer.get_iter_at_offset(contentStart + i);
-                const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
-                
-                // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
-                const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                
-                // Check if this is an emoji - emojis need special handling
-                const isEmoji = this._needsFallbackScale(char);
-                
-                if (isEmoji) {
-                    // For emojis: only apply the emoji scale tag (not the gradient tag)
-                    // The emoji tag already has the correct scaled-down size
-                    this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
+
+    // Last line whose classification is up to date
+    _classifiedFrontier() {
+        return this._classifyPending() ? this._clsLo - 1 : this._texts.length - 1;
+    }
+
+    // ------------------------------------------------------------------
+    // Cursor reveal
+    // ------------------------------------------------------------------
+
+    _updateReveal() {
+        const [hasSelection] = this.buffer.get_selection_bounds();
+        // Keep the current reveal state while a selection is being made so
+        // the text does not change width under the pointer.
+        if (hasSelection && this._revealValid) return;
+
+        const iter = this.buffer.get_iter_at_mark(this._insertMark);
+        const line = iter.get_line();
+        const col = iter.get_line_offset();
+        const lines = new Set([line]);
+        const open = this._fenceOpenFor(line);
+        if (open >= 0) {
+            lines.add(open);
+            const close = this._fenceCloseFor(open);
+            if (close >= 0) lines.add(close);
+        }
+
+        const old = this._reveal;
+        if (this._revealValid && old.line === line && old.col === col &&
+            old.lines.size === lines.size && [...lines].every(l => old.lines.has(l)))
+            return;
+
+        for (const l of old.lines) this._markTag(l);
+        for (const l of lines) this._markTag(l);
+        this._reveal = { line, col, lines };
+        this._revealValid = true;
+    }
+
+    // ------------------------------------------------------------------
+    // Flushing
+    // ------------------------------------------------------------------
+
+    _scheduleFlush() {
+        if (this._flushId || this._destroyed) return;
+        // Runs before GTK's layout/paint (GDK_PRIORITY_REDRAW), so edits and
+        // cursor moves are rendered in the same frame.
+        this._flushId = GLib.idle_add(GLib.PRIORITY_HIGH_IDLE, () => {
+            this._flushId = 0;
+            this._flush(0);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // One render pass. budgetUs: 0 = only what must be visible now (the
+    // rest continues in background chunks), Infinity = everything.
+    _flush(budgetUs) {
+        if (this._destroyed || this._inFlush) return;
+        this._inFlush = true;
+        try {
+            this._applyPendingEdit();
+            if (this._classifyPending()) {
+                if (budgetUs === Infinity) {
+                    this._classify();
                 } else {
-                    // For regular text: apply the gradient tag with header scale
-                    this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
+                    const cursorLine = this.buffer.get_iter_at_mark(this._insertMark).get_line();
+                    this._classify(Math.max(this._visibleRange()[1], cursorLine));
                 }
             }
-            // Don't return - continue to apply inline formatting to header content
+            this._updateReveal();
+            this._tagPending(budgetUs);
+        } catch (e) {
+            logError(e, 'Jotite markdown renderer');
+        } finally {
+            this._inFlush = false;
         }
-        
-        // Horizontal rule: 3 or more dashes on their own line (with optional surrounding whitespace)
-        const hrMatch = line.match(/^(\s*)(---+)(\s*)$/);
-        if (hrMatch) {
-            const [, leadingSpace, dashes, trailingSpace] = hrMatch;
-            const dashesStart = lineOffset + leadingSpace.length;
-            const dashesEnd = dashesStart + dashes.length;
-            
-            const dashesStartIter = this.buffer.get_iter_at_offset(dashesStart);
-            const dashesEndIter = this.buffer.get_iter_at_offset(dashesEnd);
-            
-            // Apply default styling (will be overridden by cursor-aware version)
-            this._applyTag('hr-line', dashesStartIter, dashesEndIter);
-            
-            // Don't process this line further for other patterns
+        this._ensureBackgroundWork();
+    }
+
+    // Background chunk: classify the next block of lines, then tag
+    _backgroundStep() {
+        if (this._destroyed || this._inFlush) return;
+        this._inFlush = true;
+        try {
+            this._applyPendingEdit();
+            if (this._classifyPending()) this._classify(this._clsLo + CLASSIFY_CHUNK_LINES);
+            this._updateReveal();
+            this._tagPending(CHUNK_BUDGET_US);
+        } catch (e) {
+            logError(e, 'Jotite markdown renderer');
+        } finally {
+            this._inFlush = false;
+        }
+        this._ensureBackgroundWork();
+    }
+
+    _ensureBackgroundWork() {
+        if (this._chunkId || this._destroyed) return;
+        if (!this._classifyPending() && this._tagLo > this._tagHi) return;
+        // Above GtkTextView's layout validation (GDK_PRIORITY_REDRAW + 5) so
+        // lines are tagged before GTK lays them out, but below redraw so
+        // frames keep being drawn and input is handled between chunks.
+        this._chunkId = GLib.idle_add(CHUNK_PRIORITY, () => {
+            this._chunkId = 0;
+            this._backgroundStep();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _visibleRange() {
+        const n = this._texts.length;
+        const tv = this.textView;
+        let a, b;
+        const rect = tv.get_mapped() ? tv.get_visible_rect() : null;
+        if (rect && rect.height > 0) {
+            a = tv.get_line_at_y(rect.y)[0].get_line();
+            b = tv.get_line_at_y(rect.y + rect.height)[0].get_line();
+        } else {
+            a = b = this.buffer.get_iter_at_mark(this._insertMark).get_line();
+            b += 40;
+        }
+        return [Math.max(0, a - VISIBLE_MARGIN), Math.min(n - 1, b + VISIBLE_MARGIN)];
+    }
+
+    // Tag pending lines (only classified ones). The reveal lines and the
+    // visible region are always done now; other lines too if few, or until
+    // budgetUs is used up; the remainder continues in background chunks.
+    _tagPending(budgetUs) {
+        const n = this._texts.length;
+        if (this._tagLo > this._tagHi) return;
+        const frontier = this._classifiedFrontier();
+
+        const tagIfDirty = (i) => {
+            if (i >= 0 && i <= frontier && this._dirty[i] !== DIRTY_NONE) this._tagLineSafe(i);
+        };
+        for (const l of this._reveal.lines) tagIfDirty(l);
+
+        const lo = Math.max(0, this._tagLo);
+        const hi = Math.min(n - 1, this._tagHi, frontier);
+        let pending = 0;
+        for (let i = lo; i <= hi && pending <= SYNC_LINE_LIMIT; i++)
+            if (this._dirty[i] !== DIRTY_NONE) pending++;
+
+        const all = pending <= SYNC_LINE_LIMIT || budgetUs === Infinity;
+        if (!all) {
+            const [va, vb] = this._visibleRange();
+            for (let i = va; i <= vb; i++) tagIfDirty(i);
+        }
+
+        const t0 = GLib.get_monotonic_time();
+        let i = lo;
+        let done = 0;
+        for (; i <= hi; i++) {
+            if (this._dirty[i] !== DIRTY_NONE) {
+                this._tagLineSafe(i);
+                if (!all && (++done & 7) === 0 && GLib.get_monotonic_time() - t0 > budgetUs) {
+                    i++;
+                    break;
+                }
+            }
+        }
+        if (i > hi && hi === Math.min(n - 1, this._tagHi)) {
+            this._tagLo = Infinity;
+            this._tagHi = -1;
+        } else {
+            this._tagLo = i;
+        }
+    }
+
+
+    _tagLineSafe(i) {
+        this._dirty[i] = DIRTY_NONE;
+        try {
+            this._tagLine(i);
+        } catch (e) {
+            logError(e, `Jotite markdown renderer: line ${i}`);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Applying tags to one line
+    // ------------------------------------------------------------------
+
+    _tagByName(name) {
+        let tag = this._namedTags.get(name);
+        if (!tag) {
+            tag = this._table.lookup(name);
+            this._namedTags.set(name, tag);
+        }
+        return tag;
+    }
+
+    _tagLine(i) {
+        if (this._texts[i] === null) this._readLine(i);
+        const text = this._texts[i];
+        const kind = this._kinds[i];
+        const buffer = this.buffer;
+        const start = this._iterAtLine(i);
+        const next = start.copy();
+        if (!next.forward_line()) next.forward_to_end();
+
+        // Remove what this renderer applied to the line before
+        for (const tag of this._lineTags[i]) {
+            if (this._ownTags.has(tag)) buffer.remove_tag(tag, start, next);
+        }
+        const used = new Set();
+        this._lineTags[i] = used;
+
+        // Two scratch iters reused for every span (avoids allocating iters)
+        const sIter = start.copy(), eIter = start.copy();
+        const applyRange = (tag, s, e) => {
+            if (typeof tag === 'string') tag = this._tagByName(tag);
+            if (!tag) return;
+            buffer.apply_tag(tag, s, e);
+            used.add(tag);
+        };
+        const apply = (tag, s, e) => {
+            if (e > s) {
+                sIter.set_line_offset(s);
+                eIter.set_line_offset(e);
+                applyRange(tag, sIter, eIter);
+            }
+        };
+
+        applyRange('no-hyphens', start, next);
+        const revealed = this._revealValid && this._reveal.lines.has(i);
+
+        if (kind === Kind.CODE) {
+            applyRange('code-block', start, next);
             return;
         }
-        
-        // List item structure for paragraph indentation (null if not a list line)
-        let listItem = null;
-        
-        // Bullet points (must be at start of line or after whitespace)
-        const bulletMatch = line.match(/^(\s*)([-*])\s+(.*)$/);
-        if (bulletMatch) {
-            const [, indent, bullet] = bulletMatch;
-            const bulletStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
-            const bulletEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + 1);
-            
-            // Apply bullet character styling
-            this._applyTag(bullet === '-' ? 'bullet-dash' : 'bullet-star', bulletStart, bulletEnd);
-            
-            // Apply margin styling to the entire line (only if not already applied)
-            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
-            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
-            
-            if (indent.length >= 1) {
-                // Apply sub-bullet margin for indented bullets (1+ spaces)
-                this._applyTag('sub-bullet-margin', lineStart, lineEnd);
-            } else {
-                // Apply bullet margin for main bullets (0 spaces)
-                this._applyTag('bullet-margin', lineStart, lineEnd);
-            }
-            
-            // Paragraph indent is applied after the inline patterns below so the
-            // measured prefix includes a rendered todo checkbox, if any
-            listItem = {
-                indentLen: indent.length,
-                markerLen: 2,
-                contentIdx: line.length - bulletMatch[3].length,
-                levelIndent: true,
-            };
-        }
-        
-        // Numbered list points (e.g., "1. item" or "  1. item")
-        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
-        if (numberedMatch) {
-            const [, indent, number] = numberedMatch;
-            const numberStart = this.buffer.get_iter_at_offset(lineOffset + indent.length);
-            const numberEnd = this.buffer.get_iter_at_offset(lineOffset + indent.length + number.length + 1); // +1 for the dot
-            
-            // Apply numbered list number styling (dimmed)
-            this._applyTag('numbered-list-number', numberStart, numberEnd);
-            
-            // Apply margin styling to the entire line
-            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
-            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
-            
-            if (indent.length >= 3) {
-                // Apply sub-numbered-list margin for indented items (3+ spaces)
-                this._applyTag('sub-numbered-list-margin', lineStart, lineEnd);
-            } else {
-                // Apply numbered-list margin for main items (0-2 spaces)
-                this._applyTag('numbered-list-margin', lineStart, lineEnd);
-            }
-            
-            // Paragraph indent is applied after the inline patterns below
-            listItem = {
-                indentLen: indent.length,
-                markerLen: number.length + 2,
-                contentIdx: line.length - numberedMatch[3].length,
-                levelIndent: false,
-            };
-        }
-        
-        // Todo items: apply pattern for [ ] and [X] (but styling happens in cursor-aware version)
-        this._applyTodoPattern(line, lineOffset);
-        
-        // Paragraph indent for list items, measured after checkbox tags are in place
-        if (listItem) {
-            // Wrapped lines align with the text after a leading todo checkbox
-            const todoMatch = line.slice(listItem.contentIdx).match(/^\[[ Xx]\]\s*/);
-            if (todoMatch) {
-                listItem.contentIdx += todoMatch[0].length;
-            }
-            this._applyListIndent(lineOffset, listItem);
-        }
-        
-        // Table rows: detect and style pipes and cells
-        this._applyTablePattern(line, lineOffset);
-        
-        // Process patterns in order: bold first, then italic, then code, then strikethrough
-        // Bold: **text** or __text__
-        this._applyPattern(line, lineOffset, /\*\*(.+?)\*\*/g, 'bold');
-        this._applyPattern(line, lineOffset, /__(.+?)__/g, 'bold');
-        
-        // Code: `code`
-        this._applyPattern(line, lineOffset, /`([^`]+?)`/g, 'code');
-        
-        // Italic: handled specially to avoid matching **
-        this._applyItalicPatternSimple(line, lineOffset);
-        
-        // Strikethrough: ~~text~~
-        this._applyPattern(line, lineOffset, /~~(.+?)~~/g, 'strikethrough');
-        
-        // Underline: ++text++
-        this._applyPattern(line, lineOffset, /\+\+(.+?)\+\+/g, 'underline');
-        
-        // Links: [text](url)
-        this._applyLinkPattern(line, lineOffset);
-    }
-    
-    _applyItalicPatternSimple(line, lineOffset) {
-        for (const span of this._findItalicSpans(line)) {
-            this._applyItalicSpan(lineOffset + span.start, lineOffset + span.end, false);
-        }
-    }
-    
-    // Find single-delimiter emphasis spans (*text* or _text_). Returns
-    // [{start, end}] indices into line, covering the delimiters. The rules
-    // follow CommonMark closely enough for notes: an opening delimiter must be
-    // followed by non-whitespace and a closing one preceded by non-whitespace,
-    // neither may be part of a doubled delimiter (** / __), and underscores
-    // inside a word (snake_case, file_names, URLs) never open or close a span.
-    _findItalicSpans(line) {
-        const spans = [];
-        const isWordChar = (ch) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
-        const isSpace = (ch) => ch === undefined || /\s/.test(ch);
-        
-        let i = 0;
-        while (i < line.length) {
-            const d = line[i];
-            const opens = (d === '*' || d === '_')
-                && line[i + 1] !== d && line[i - 1] !== d
-                && !isSpace(line[i + 1])
-                && !(d === '_' && isWordChar(line[i - 1]));
-            
-            if (opens) {
-                let j = i + 2;
-                for (; j < line.length; j++) {
-                    const closes = line[j] === d
-                        && line[j + 1] !== d && line[j - 1] !== d
-                        && !isSpace(line[j - 1])
-                        && !(d === '_' && isWordChar(line[j + 1]));
-                    if (closes) break;
-                }
-                if (j < line.length) {
-                    spans.push({ start: i, end: j + 1 });
-                    i = j + 1;
-                    continue;
-                }
-            }
-            i++;
-        }
-        return spans;
-    }
-    
-    // Style one italic span; delimiters are dimmed when showSyntax, else hidden
-    _applyItalicSpan(matchStart, matchEnd, showSyntax) {
-        const syntaxTag = showSyntax ? 'dim' : 'invisible';
-        const at = (offset) => this.buffer.get_iter_at_offset(offset);
-        
-        this._applyTag('italic', at(matchStart), at(matchEnd));
-        this._applyTag(syntaxTag, at(matchStart), at(matchStart + 1));
-        this._applyTag(syntaxTag, at(matchEnd - 1), at(matchEnd));
-    }
-    _applyPattern(line, lineOffset, regex, tagName) {
-        let match;
-        regex.lastIndex = 0;
-        
-        while ((match = regex.exec(line)) !== null) {
-            const matchStart = match.index;
-            const matchEnd = matchStart + match[0].length;
-            const contentStart = matchStart + match[0].indexOf(match[match.length - 1]);
-            const contentEnd = contentStart + match[match.length - 1].length;
-            
-            // Apply tag to entire match
-            const start = this.buffer.get_iter_at_offset(lineOffset + matchStart);
-            const end = this.buffer.get_iter_at_offset(lineOffset + matchEnd);
-            this._applyTag(tagName, start, end);
-            
-            // Dim the syntax markers
-            const syntaxStart1 = this.buffer.get_iter_at_offset(lineOffset + matchStart);
-            const syntaxEnd1 = this.buffer.get_iter_at_offset(lineOffset + contentStart);
-            this._applyTag('dim', syntaxStart1, syntaxEnd1);
-            
-            const syntaxStart2 = this.buffer.get_iter_at_offset(lineOffset + contentEnd);
-            const syntaxEnd2 = this.buffer.get_iter_at_offset(lineOffset + matchEnd);
-            this._applyTag('dim', syntaxStart2, syntaxEnd2);
-        }
-    }
-    
-    _applyLinkPattern(line, lineOffset) {
-        const regex = /\[(.+?)\]\((.+?)\)/g;
-        let match;
-        
-        while ((match = regex.exec(line)) !== null) {
-            const [fullMatch, text, url] = match;
-            const matchStart = match.index;
-            const textStart = matchStart + 1;
-            const textEnd = textStart + text.length;
-            const urlStart = textEnd + 2;
-            const urlEnd = urlStart + url.length;
-            
-            // Apply link tag to text
-            const linkStart = this.buffer.get_iter_at_offset(lineOffset + textStart);
-            const linkEnd = this.buffer.get_iter_at_offset(lineOffset + textEnd);
-            this._applyTag('link', linkStart, linkEnd);
-            
-            // Apply link-url tag to URL
-            const urlStartIter = this.buffer.get_iter_at_offset(lineOffset + urlStart);
-            const urlEndIter = this.buffer.get_iter_at_offset(lineOffset + urlEnd);
-            this._applyTag('link-url', urlStartIter, urlEndIter);
-            
-            // Dim the brackets and parentheses
-            const bracket1 = this.buffer.get_iter_at_offset(lineOffset + matchStart);
-            const bracket2 = this.buffer.get_iter_at_offset(lineOffset + matchStart + 1);
-            this._applyTag('dim', bracket1, bracket2);
-            
-            const bracket3 = this.buffer.get_iter_at_offset(lineOffset + textEnd);
-            const bracket4 = this.buffer.get_iter_at_offset(lineOffset + textEnd + 1);
-            this._applyTag('dim', bracket3, bracket4);
-            
-            const paren1 = this.buffer.get_iter_at_offset(lineOffset + urlStart - 1);
-            const paren2 = this.buffer.get_iter_at_offset(lineOffset + urlStart);
-            this._applyTag('dim', paren1, paren2);
-            
-            const paren3 = this.buffer.get_iter_at_offset(lineOffset + urlEnd);
-            const paren4 = this.buffer.get_iter_at_offset(lineOffset + urlEnd + 1);
-            this._applyTag('dim', paren3, paren4);
-        }
-    }
-    
-    _applyTodoPattern(line, lineOffset) {
-        // Match [ ] for unchecked or [X] for checked (also [x] lowercase)
-        const regex = /\[([ Xx])\]/g;
-        let match;
-        
-        while ((match = regex.exec(line)) !== null) {
-            const matchStart = lineOffset + match.index;
-            const matchEnd = matchStart + 3; // Length of [ ] or [X]
-            const checkChar = match[1];
-            const isChecked = checkChar === 'X' || checkChar === 'x';
-            
-            // Apply the appropriate tag
-            const start = this.buffer.get_iter_at_offset(matchStart);
-            const end = this.buffer.get_iter_at_offset(matchEnd);
-            this._applyTag(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
-            
-            // Dim the brackets (will be overridden by invisible in cursor-aware version)
-            const bracket1 = this.buffer.get_iter_at_offset(matchStart);
-            const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-            this._applyTag('dim', bracket1, bracket2);
-            
-            const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
-            const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
-            this._applyTag('dim', bracket3, bracket4);
-            
-            // If checked, apply strikethrough and dimming to the text after the checkbox
-            if (isChecked) {
-                // Find text after the checkbox (skip any spaces after the checkbox)
-                const textAfterCheckbox = line.substring(match.index + 3); // Everything after [X]
-                const textMatch = textAfterCheckbox.match(/^\s*/); // Find leading spaces
-                const spacesLength = textMatch ? textMatch[0].length : 0;
-                const textStart = matchEnd + spacesLength;
-                const textEnd = lineOffset + line.length;
-                
-                // Apply strikethrough and dimming to the text after the checkbox
-                if (textStart < textEnd) {
-                    const textStartIter = this.buffer.get_iter_at_offset(textStart);
-                    const textEndIter = this.buffer.get_iter_at_offset(textEnd);
-                    this._applyTag('todo-checked-text', textStartIter, textEndIter);
-                }
-            }
-        }
-    }
-    
-    _handleArrowTransformations(text, cursorOffset) {
-        // Track cursor movement direction using previous position
-        const movingRight = cursorOffset > this._previousCursorPosition;
-        const movingLeft = cursorOffset < this._previousCursorPosition;
-        const hasMovement = movingRight || movingLeft;
-        
-        // Find all arrows (both ASCII and Unicode) and transform based on cursor position
-        // Use buffer iterators to handle multi-byte characters (emojis) correctly
-        const transformations = []; // [{offset, length, replacement, cursorPos}]
-        
-        // Iterate through the buffer to find arrows using byte offsets
-        const iter = this.buffer.get_start_iter();
-        const endIter = this.buffer.get_end_iter();
-        
-        while (!iter.equal(endIter)) {
-            const currentOffset = iter.get_offset();
-            const iter2 = iter.copy();
-            
-            // Check for -> (2 chars)
-            if (!iter2.forward_chars(2)) {
-                // Not enough characters left
-                if (!iter.forward_char()) break;
-                continue;
-            }
-            
-            const twoCharText = this.buffer.get_text(iter, iter2, false);
-            if (twoCharText === '->') {
-                const arrowStart = currentOffset;
-                const arrowEnd = iter2.get_offset();
-                const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
-                
-                if (!cursorNear) {
-                    // Cursor is away, replace -> with →
-                    transformations.push({
-                        offset: arrowStart,
-                        length: arrowEnd - arrowStart,
-                        replacement: '→',
-                        cursorPos: null
-                    });
-                }
-                // Skip past this arrow
-                iter.forward_chars(2);
-                continue;
-            }
-            
-            if (twoCharText === '<-') {
-                const arrowStart = currentOffset;
-                const arrowEnd = iter2.get_offset();
-                const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
-                
-                if (!cursorNear) {
-                    // Cursor is away, replace <- with ←
-                    transformations.push({
-                        offset: arrowStart,
-                        length: arrowEnd - arrowStart,
-                        replacement: '←',
-                        cursorPos: null
-                    });
-                }
-                // Skip past this arrow
-                iter.forward_chars(2);
-                continue;
-            }
-            
-            // Check for Unicode arrows (only if movement detected)
-            if (hasMovement) {
-                const iter1 = iter.copy();
-                if (!iter1.forward_char()) break;
-                
-                const oneCharText = this.buffer.get_text(iter, iter1, false);
-                const arrowStart = currentOffset;
-                const arrowEnd = iter1.get_offset();
-                
-                if (oneCharText === '→') {
-                    const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
-                    
-                    if (cursorNear) {
-                        // Cursor is near, replace → with ->
-                        // Position cursor based on entry direction
-                        let newCursorPos;
-                        if (movingRight) {
-                            // Entered from left, put cursor at start of arrow
-                            newCursorPos = arrowStart;
-                        } else if (movingLeft) {
-                            // Entered from right, account for expansion from 1 char to 2
-                            newCursorPos = arrowStart + 2;
-                        } else {
-                            newCursorPos = arrowStart;
-                        }
-                        
-                        transformations.push({
-                            offset: arrowStart,
-                            length: arrowEnd - arrowStart,
-                            replacement: '->',
-                            cursorPos: newCursorPos
-                        });
-                    }
-                    // Skip past this arrow
-                    iter.forward_char();
-                    continue;
-                }
-                
-                if (oneCharText === '←') {
-                    const cursorNear = cursorOffset >= arrowStart && cursorOffset <= arrowEnd;
-                    
-                    if (cursorNear) {
-                        // Cursor is near, replace ← with <-
-                        // Position cursor based on entry direction
-                        let newCursorPos;
-                        if (movingRight) {
-                            // Entered from left, put cursor at start of arrow
-                            newCursorPos = arrowStart;
-                        } else if (movingLeft) {
-                            // Entered from right, account for expansion from 1 char to 2
-                            newCursorPos = arrowStart + 2;
-                        } else {
-                            newCursorPos = arrowStart;
-                        }
-                        
-                        transformations.push({
-                            offset: arrowStart,
-                            length: arrowEnd - arrowStart,
-                            replacement: '<-',
-                            cursorPos: newCursorPos
-                        });
-                    }
-                    // Skip past this arrow
-                    iter.forward_char();
-                    continue;
-                }
-            }
-            
-            // Move to next character
-            if (!iter.forward_char()) break;
-        }
-        
-        // Apply replacements from the highest offset down. Each replacement
-        // only shifts text after it, so earlier offsets stay valid as recorded.
-        transformations.sort((a, b) => b.offset - a.offset);
-        
-        let finalCursorPos = null;
-        for (const transform of transformations) {
-            const [, bufferEnd] = this.buffer.get_bounds();
-            if (transform.offset + transform.length > bufferEnd.get_offset()) {
-                continue;
-            }
-            
-            const startIter = this.buffer.get_iter_at_offset(transform.offset);
-            const endIter = this.buffer.get_iter_at_offset(transform.offset + transform.length);
-            this.buffer.delete(startIter, endIter);
-            
-            const insertIter = this.buffer.get_iter_at_offset(transform.offset);
-            this.buffer.insert(insertIter, transform.replacement, -1);
-            
-            if (transform.cursorPos !== null) {
-                // Replacements at lower offsets are applied afterwards and move
-                // this position by their change in length
-                const shift = transformations
-                    .filter(other => other.offset < transform.offset)
-                    .reduce((sum, other) => sum + (other.replacement.length - other.length), 0);
-                finalCursorPos = transform.cursorPos + shift;
-            }
-        }
-        
-        // Set cursor position after all transformations are complete
-        if (finalCursorPos !== null) {
-            const newCursorIter = this.buffer.get_iter_at_offset(finalCursorPos);
-            this.buffer.place_cursor(newCursorIter);
-        }
-    }
-    
-    _updateSyntaxVisibility() {
-        if (this.updating) return;
-        
-        this.updating = true;
-        
-        // Get cursor position
-        const cursor = this.buffer.get_insert();
-        const cursorIter = this.buffer.get_iter_at_mark(cursor);
-        const cursorOffset = cursorIter.get_offset();
-        
-        // Get all text
-        const [start, end] = this.buffer.get_bounds();
-        const text = this.buffer.get_text(start, end, false);
-        
-        // Handle arrow transformations based on cursor position
-        this._handleArrowTransformations(text, cursorOffset);
-        
-        // Get updated text after arrow transformations
-        const [start2, end2] = this.buffer.get_bounds();
-        const updatedText = this.buffer.get_text(start2, end2, false);
-        
-        // Update cursor offset if text length changed
-        const cursor2 = this.buffer.get_insert();
-        const cursorIter2 = this.buffer.get_iter_at_mark(cursor2);
-        const updatedCursorOffset = cursorIter2.get_offset();
-        
-        // Remove only tags that were actually applied (Optimization #1)
-        this._appliedTags.forEach(tagName => {
-            const tag = this.buffer.get_tag_table().lookup(tagName);
-            if (tag) {
-                this.buffer.remove_tag(tag, start2, end2);
-            }
-        });
-        this._appliedTags.clear(); // Clear for next render
-        
-        this.buffer.apply_tag_by_name('no-hyphens', start2, end2);
-        
-        // Find all markdown patterns and apply them
-        // Show syntax markers only when cursor is inside the pattern
-        this._applyMarkdownWithCursorContext(updatedText, updatedCursorOffset);
-        
-        this.updating = false;
-    }
-    
-    _applyMarkdownWithCursorContext(text, cursorOffset) {
-        // Iterate using TextIter to get correct byte offsets (handles multi-byte chars like emojis)
-        let iter = this.buffer.get_start_iter();
-        let inCodeBlock = false;
-        let codeBlockStart = -1;
-        let codeBlockStartIter = null;
-        let lineNum = 0;
-        
-        do {
-            const lineStart = iter.copy();
-            
-            // Move to end of line
-            if (!iter.ends_line()) {
-                iter.forward_to_line_end();
-            }
-            const lineEnd = iter.copy();
-            
-            // Get line text and byte offset
-            const lineText = this.buffer.get_text(lineStart, lineEnd, false);
-            const lineOffset = lineStart.get_offset();
-            const lineEndOffset = lineEnd.get_offset();
-            
-            // Check if cursor is on this line
-            const cursorOnLine = cursorOffset >= lineOffset && cursorOffset <= lineEndOffset;
-            
-            // Check for code block markers
-            if (lineText.trim().startsWith('```')) {
-                if (!inCodeBlock) {
-                    // Starting a code block
-                    inCodeBlock = true;
-                    codeBlockStart = lineOffset;
-                    codeBlockStartIter = lineStart.copy();
-                } else {
-                    // Ending a code block
-                    const cursorInBlock = cursorOffset >= codeBlockStart && cursorOffset <= lineEndOffset;
-                    
-                    const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-                    this._applyTag('code-block', blockStart, lineEnd);
-                    
-                    // Dim or hide the backticks based on cursor position
-                    if (cursorInBlock) {
-                        // Show backticks when cursor is in the block
-                        const codeBlockStartEnd = codeBlockStartIter.copy();
-                        if (!codeBlockStartEnd.ends_line()) {
-                            codeBlockStartEnd.forward_to_line_end();
-                        }
-                        this._applyTag('dim', codeBlockStartIter, codeBlockStartEnd);
-                        this._applyTag('dim', lineStart, lineEnd);
-                    } else {
-                        // Hide backticks when cursor is outside
-                        const codeBlockStartEnd = codeBlockStartIter.copy();
-                        if (!codeBlockStartEnd.ends_line()) {
-                            codeBlockStartEnd.forward_to_line_end();
-                        }
-                        this._applyTag('invisible', codeBlockStartIter, codeBlockStartEnd);
-                        this._applyTag('invisible', lineStart, lineEnd);
-                    }
-                    
-                    inCodeBlock = false;
-                    codeBlockStart = -1;
-                    codeBlockStartIter = null;
-                }
-            } else if (inCodeBlock) {
-                // Inside code block, will be styled when block ends
-            } else {
-                // Normal line processing
-                this._applyLineMarkdownWithCursor(lineText, lineOffset, cursorOffset, cursorOnLine, lineNum);
-            }
-            
-            lineNum++;
-        } while (iter.forward_line());
-        
-        // An unterminated code block extends to the end of the document.
-        // Keep its opening fence visible so it is clear why the rest is code.
-        if (inCodeBlock) {
-            const blockStart = this.buffer.get_iter_at_offset(codeBlockStart);
-            const [, bufferEnd] = this.buffer.get_bounds();
-            this._applyTag('code-block', blockStart, bufferEnd);
-            
-            const fenceEnd = codeBlockStartIter.copy();
-            if (!fenceEnd.ends_line()) {
-                fenceEnd.forward_to_line_end();
-            }
-            this._applyTag('dim', codeBlockStartIter, fenceEnd);
-        }
-    }
-    
-    _applyLineMarkdownWithCursor(line, lineOffset, cursorOffset, cursorOnLine, lineNum) {
-        line = this._toBufferIndexed(line);
-        
-        // Headers (must be at start of line), one to six hashes
-        const headerMatch = line.match(/^(#{1,6})(\s+)(.+)$/);
-        if (headerMatch) {
-            const [, hashes, spaces, content] = headerMatch;
-            const actualLevel = hashes.length; // Actual number of hashes
-            const styleLevel = Math.min(actualLevel, 6); // Cap at level 6 for styling
-            const start = this.buffer.get_iter_at_offset(lineOffset);
-            
-            // Show/hide the hashes and spaces based on cursor position
-            const hashEnd = this.buffer.get_iter_at_offset(lineOffset + hashes.length + spaces.length);
-            if (cursorOnLine) {
-                // Cursor is on this line - show hashes with level-specific dim tag
-                this._applyTag(`dim-h${styleLevel}`, start, hashEnd);
-            } else {
-                // Cursor is on a different line - hide the hashes
-                this._applyTag('invisible', start, hashEnd);
-            }
-            
-            // Assign mood based on header level (# gets color 0, ## gets color 1, etc.)
-            const moodIndex = (actualLevel - 1) % this.moodNames.length;
-            const mood = this.moodNames[moodIndex];
-            const gradientColors = this.moodGradients[mood];
-            
-            // Apply gradient with 45-degree diagonal pattern
-            // Calculate actual content start position accounting for all spaces
-            const contentStart = lineOffset + hashes.length + spaces.length;
-            
-            // Use Array.from to properly iterate Unicode code points (handles emojis correctly)
-            const chars = Array.from(content);
-            
-            // GTK TextBuffer counts each character (including emojis) as 1 position
-            for (let i = 0; i < chars.length; i++) {
-                const char = chars[i];
-                
-                // Each character is 1 position in GTK buffer (even emojis)
-                const charStart = this.buffer.get_iter_at_offset(contentStart + i);
-                const charEnd = this.buffer.get_iter_at_offset(contentStart + i + 1);
-                
-                // 45-degree diagonal: color based on (charPos + actualLevel) for diagonal stripes
-                const gradientIndex = (i + (actualLevel * 2)) % gradientColors.length;
-                
-                // Check if this is an emoji - emojis need special handling
-                const isEmoji = this._needsFallbackScale(char);
-                
-                if (isEmoji) {
-                    // For emojis: only apply the emoji scale tag (not the gradient tag)
-                    // The emoji tag already has the correct scaled-down size
-                    this._applyTag(`emoji-h${styleLevel}`, charStart, charEnd);
-                } else {
-                    // For regular text: apply the gradient tag with header scale
-                    this._applyTag(`gradient-${mood}-h${styleLevel}-${gradientIndex}`, charStart, charEnd);
-                }
-            }
-            // Don't return - continue to apply inline formatting to header content
-        }
-        
-        // Horizontal rule: 3 or more dashes on their own line (with optional surrounding whitespace)
-        const hrMatch = line.match(/^(\s*)(---+)(\s*)$/);
-        if (hrMatch) {
-            const [, leadingSpace, dashes, trailingSpace] = hrMatch;
-            const dashesStart = lineOffset + leadingSpace.length;
-            const dashesEnd = dashesStart + dashes.length;
-            
-            const dashesStartIter = this.buffer.get_iter_at_offset(dashesStart);
-            const dashesEndIter = this.buffer.get_iter_at_offset(dashesEnd);
-            
-            if (cursorOnLine) {
-                // Cursor is on the line - show dashes with dim styling
-                this._applyTag('hr-line-dim', dashesStartIter, dashesEndIter);
-            } else {
-                // Cursor is away - show as full-width line with strikethrough effect
-                this._applyTag('hr-line', dashesStartIter, dashesEndIter);
-            }
-            
-            // Don't process this line further for other patterns
+        if (kind === Kind.FENCE_OPEN || kind === Kind.FENCE_CLOSE) {
+            applyRange('code-block', start, next);
+            // An unclosed fence stays visible so it is clear why the rest
+            // of the note is code
+            const show = revealed || (kind === Kind.FENCE_OPEN && this._fenceCloseFor(i) < 0);
+            const end = this._lineEndIter(start);
+            if (end.compare(start) > 0) applyRange(show ? 'dim' : 'invisible', start, end);
             return;
         }
-        
-        // List item structure for paragraph indentation (null if not a list line)
-        let listItem = null;
-        
-        // Bullet points - handle * and - bullets
-        const bulletMatch = line.match(/^(\s*)([-*])\s+(.*)$/);
-        if (bulletMatch) {
-            const [, indent, bullet] = bulletMatch;
-            const bulletPos = lineOffset + indent.length;
-            const bulletStart = this.buffer.get_iter_at_offset(bulletPos);
-            const bulletEnd = this.buffer.get_iter_at_offset(bulletPos + 1);
-            
-            // Check if cursor is right next to the bullet (at or adjacent to bullet position)
-            const cursorNearBullet = cursorOffset >= bulletPos && cursorOffset <= bulletPos + 1;
-            
-            // Apply styling ONLY - never modify buffer content
-            if (bullet === '-') {
-                // Dash bullet: always show with reduced opacity
-                this._applyTag('bullet-dash', bulletStart, bulletEnd);
-            } else if (bullet === '*') {
-                // Asterisk bullet: style based on cursor proximity
-                if (cursorNearBullet) {
-                    // Show visible asterisk when cursor is right next to the bullet
-                    this._applyTag('bullet-star-near', bulletStart, bulletEnd);
-                } else {
-                    // Render a solid dot when cursor is away
-                    this._applyTag('bullet-star', bulletStart, bulletEnd);
-                }
-            }
-            
-            // Apply margin styling to the entire line
-            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
-            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
-            
-            if (indent.length >= 1) {
-                // Apply sub-bullet margin for indented bullets (1+ spaces)
-                this._applyTag('sub-bullet-margin', lineStart, lineEnd);
-            } else {
-                // Apply bullet margin for main bullets (0 spaces)
-                this._applyTag('bullet-margin', lineStart, lineEnd);
-            }
-            
-            // Paragraph indent is applied after the inline patterns below so the
-            // measured prefix includes a rendered todo checkbox, if any
-            listItem = {
-                indentLen: indent.length,
-                markerLen: 2,
-                contentIdx: line.length - bulletMatch[3].length,
-                levelIndent: true,
-            };
+        if (kind === Kind.BLANK) return;
+
+        const model = Parser.parseLine(text, i > 0 ? this._fenceOut[i - 1] : '');
+        const col = (this._revealValid && this._reveal.line === i) ? this._reveal.col : -1;
+
+        for (const s of model.spans) apply(s.t, s.s, s.e);
+        for (const m of model.marks) {
+            const on = col >= 0 && col >= m.gs && col <= m.ge;
+            const tag = on ? m.on : m.off;
+            if (tag) apply(tag, m.s, m.e);
         }
-        
-        // Numbered list points (e.g., "1. item" or "  1. item")
-        const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
-        if (numberedMatch) {
-            const [, indent, number] = numberedMatch;
-            const numberPos = lineOffset + indent.length;
-            const numberStart = this.buffer.get_iter_at_offset(numberPos);
-            const numberEnd = this.buffer.get_iter_at_offset(numberPos + number.length + 1); // +1 for the dot
-            
-            // Apply numbered list number styling (dimmed, similar to dash bullets)
-            this._applyTag('numbered-list-number', numberStart, numberEnd);
-            
-            // Apply margin styling to the entire line
-            const lineStart = this.buffer.get_iter_at_offset(lineOffset);
-            const lineEnd = this.buffer.get_iter_at_offset(lineOffset + line.length);
-            
-            if (indent.length >= 3) {
-                // Apply sub-numbered-list margin for indented items (3+ spaces)
-                this._applyTag('sub-numbered-list-margin', lineStart, lineEnd);
-            } else {
-                // Apply numbered-list margin for main items (0-2 spaces)
-                this._applyTag('numbered-list-margin', lineStart, lineEnd);
-            }
-            
-            // Paragraph indent is applied after the inline patterns below
-            listItem = {
-                indentLen: indent.length,
-                markerLen: number.length + 2,
-                contentIdx: line.length - numberedMatch[3].length,
-                levelIndent: false,
-            };
-        }
-        
-        // Todo items with cursor awareness
-        this._applyTodoPatternWithCursor(line, lineOffset, cursorOffset);
-        
-        // Paragraph indent for list items, measured after checkbox tags are in place
-        if (listItem) {
-            // Wrapped lines align with the text after a leading todo checkbox
-            const todoMatch = line.slice(listItem.contentIdx).match(/^\[[ Xx]\]\s*/);
-            if (todoMatch) {
-                listItem.contentIdx += todoMatch[0].length;
-            }
-            this._applyListIndent(lineOffset, listItem);
-        }
-        
-        // Table rows: detect and style pipes and cells with cursor awareness
-        this._applyTablePatternWithCursor(line, lineOffset, cursorOffset);
-        
-        // For inline patterns, check if cursor is inside each pattern
-        // Process bold first, then italic, then code, then strikethrough
-        // Bold takes priority so we process it before italic
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /\*\*(.+?)\*\*/g, 'bold');
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /__(.+?)__/g, 'bold');
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /`([^`]+?)`/g, 'code');
-        // For italic, we need to avoid matching ** by checking the character isn't an asterisk
-        this._applyItalicPattern(line, lineOffset, cursorOffset);
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /~~(.+?)~~/g, 'strikethrough');
-        this._applyPatternWithCursor(line, lineOffset, cursorOffset, /\+\+(.+?)\+\+/g, 'underline');
-        this._applyLinkPatternWithCursor(line, lineOffset, cursorOffset);
-    }
-    
-    _applyItalicPattern(line, lineOffset, cursorOffset) {
-        for (const span of this._findItalicSpans(line)) {
-            const matchStart = lineOffset + span.start;
-            const matchEnd = lineOffset + span.end;
-            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
-            this._applyItalicSpan(matchStart, matchEnd, cursorInside);
+
+        if (model.heading) this._applyHeading(model.heading, text, apply);
+
+        if (model.prefix && model.prefix.end > 0) {
+            const task = model.task;
+            const boxRevealed = !!task && col >= task.s && col <= task.s + 3;
+            const tag = this._indentTag(model.prefix, !!task && task.checked, boxRevealed);
+            if (tag) applyRange(tag, start, next);
         }
     }
-    _applyPatternWithCursor(line, lineOffset, cursorOffset, regex, tagName) {
-        let match;
-        regex.lastIndex = 0;
-        
-        while ((match = regex.exec(line)) !== null) {
-            const matchStart = lineOffset + match.index;
-            const matchEnd = matchStart + match[0].length;
-            const contentStart = matchStart + match[0].indexOf(match[match.length - 1]);
-            const contentEnd = contentStart + match[match.length - 1].length;
-            
-            // Check if cursor is inside this pattern
-            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
-            
-            // Apply formatting tag to entire match
-            const start = this.buffer.get_iter_at_offset(matchStart);
-            const end = this.buffer.get_iter_at_offset(matchEnd);
-            this._applyTag(tagName, start, end);
-            
-            // Show syntax markers only when cursor is inside
-            if (cursorInside) {
-                // Dim the syntax markers (visible but subtle)
-                const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                this._applyTag('dim', syntaxStart1, syntaxEnd1);
-                
-                const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                this._applyTag('dim', syntaxStart2, syntaxEnd2);
-            } else {
-                // Cursor is outside - make syntax invisible
-                const syntaxStart1 = this.buffer.get_iter_at_offset(matchStart);
-                const syntaxEnd1 = this.buffer.get_iter_at_offset(contentStart);
-                this._applyTag('invisible', syntaxStart1, syntaxEnd1);
-                
-                const syntaxStart2 = this.buffer.get_iter_at_offset(contentEnd);
-                const syntaxEnd2 = this.buffer.get_iter_at_offset(matchEnd);
-                this._applyTag('invisible', syntaxStart2, syntaxEnd2);
+
+
+    _applyHeading(heading, text, apply) {
+        const level = heading.level;
+        const moodIndex = (level - 1) % this._moods.length;
+        const gradient = this._moods[moodIndex].gradient;
+        const chars = Array.from(text);
+        let runTag = null, runStart = 0;
+        for (let c = heading.contentStart; c <= heading.contentEnd; c++) {
+            let tag = null;
+            if (c < heading.contentEnd) {
+                const i = c - heading.contentStart;
+                tag = this._needsFallbackScale(chars[c])
+                    ? `emoji-h${level}`
+                    : this._gradientTag(moodIndex, level, (i + level * 2) % gradient.length);
+            }
+            if (tag !== runTag) {
+                if (runTag) apply(runTag, runStart, c);
+                runTag = tag;
+                runStart = c;
             }
         }
     }
-    
-    _applyLinkPatternWithCursor(line, lineOffset, cursorOffset) {
-        const regex = /\[(.+?)\]\((.+?)\)/g;
-        let match;
-        
-        while ((match = regex.exec(line)) !== null) {
-            const [fullMatch, text, url] = match;
-            const matchStart = lineOffset + match.index;
-            const textStart = matchStart + 1;
-            const textEnd = textStart + text.length;
-            const urlStart = textEnd + 2;
-            const urlEnd = urlStart + url.length;
-            const matchEnd = urlEnd + 1;
-            
-            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
-            
-            // Apply link tag to text
-            const linkStart = this.buffer.get_iter_at_offset(textStart);
-            const linkEnd = this.buffer.get_iter_at_offset(textEnd);
-            this._applyTag('link', linkStart, linkEnd);
-            
-            // Show URL and syntax when cursor is inside
-            if (cursorInside) {
-                // Apply link-url tag to URL (visible)
-                const urlStartIter = this.buffer.get_iter_at_offset(urlStart);
-                const urlEndIter = this.buffer.get_iter_at_offset(urlEnd);
-                this._applyTag('link-url', urlStartIter, urlEndIter);
-                
-                // Dim the brackets and parentheses
-                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
-                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this._applyTag('dim', bracket1, bracket2);
-                
-                const bracket3 = this.buffer.get_iter_at_offset(textEnd);
-                const bracket4 = this.buffer.get_iter_at_offset(textEnd + 1);
-                this._applyTag('dim', bracket3, bracket4);
-                
-                const paren1 = this.buffer.get_iter_at_offset(urlStart - 1);
-                const paren2 = this.buffer.get_iter_at_offset(urlStart);
-                this._applyTag('dim', paren1, paren2);
-                
-                const paren3 = this.buffer.get_iter_at_offset(urlEnd);
-                const paren4 = this.buffer.get_iter_at_offset(urlEnd + 1);
-                this._applyTag('dim', paren3, paren4);
-            } else {
-                // Hide URL and syntax when cursor is outside
-                const urlStartIter = this.buffer.get_iter_at_offset(urlStart);
-                const urlEndIter = this.buffer.get_iter_at_offset(urlEnd);
-                this._applyTag('invisible', urlStartIter, urlEndIter);
-                
-                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
-                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this._applyTag('invisible', bracket1, bracket2);
-                
-                const bracket3 = this.buffer.get_iter_at_offset(textEnd);
-                const bracket4 = this.buffer.get_iter_at_offset(textEnd + 1);
-                this._applyTag('invisible', bracket3, bracket4);
-                
-                const paren1 = this.buffer.get_iter_at_offset(urlStart - 1);
-                const paren2 = this.buffer.get_iter_at_offset(urlStart);
-                this._applyTag('invisible', paren1, paren2);
-                
-                const paren3 = this.buffer.get_iter_at_offset(urlEnd);
-                const paren4 = this.buffer.get_iter_at_offset(urlEnd + 1);
-                this._applyTag('invisible', paren3, paren4);
-            }
-        }
-    }
-    
-    _applyTodoPatternWithCursor(line, lineOffset, cursorOffset) {
-        // Match [ ] for unchecked or [X] for checked (also [x] lowercase)
-        const regex = /\[([ Xx])\]/g;
-        let match;
-        
-        while ((match = regex.exec(line)) !== null) {
-            const matchStart = lineOffset + match.index;
-            const matchEnd = matchStart + 3; // Length of [ ] or [X]
-            const checkChar = match[1];
-            const isChecked = checkChar === 'X' || checkChar === 'x';
-            
-            const cursorInside = cursorOffset >= matchStart && cursorOffset <= matchEnd;
-            
-            if (cursorInside) {
-                // Cursor is inside the checkbox
-            }
-            
-            // Apply the base tag for the entire checkbox
-            const start = this.buffer.get_iter_at_offset(matchStart);
-            const end = this.buffer.get_iter_at_offset(matchEnd);
-            
-            if (cursorInside) {
-                // When cursor is inside, use tags without background
-                this._applyTag(isChecked ? 'todo-checked-inside' : 'todo-unchecked-inside', start, end);
-                
-                // Show the actual syntax when cursor is inside - dim everything (brackets and X)
-                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
-                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this._applyTag('dim', bracket1, bracket2);
-                
-                // Dim the middle character (X or space) as well
-                const middle1 = this.buffer.get_iter_at_offset(matchStart + 1);
-                const middle2 = this.buffer.get_iter_at_offset(matchStart + 2);
-                this._applyTag('dim', middle1, middle2);
-                
-                const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
-                const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
-                this._applyTag('dim', bracket3, bracket4);
-            } else {
-                // When cursor is outside, use tags with background
-                this._applyTag(isChecked ? 'todo-checked' : 'todo-unchecked', start, end);
-                
-                // Hide the brackets to make it look cleaner
-                const bracket1 = this.buffer.get_iter_at_offset(matchStart);
-                const bracket2 = this.buffer.get_iter_at_offset(matchStart + 1);
-                this._applyTag('invisible', bracket1, bracket2);
-                
-                const bracket3 = this.buffer.get_iter_at_offset(matchEnd - 1);
-                const bracket4 = this.buffer.get_iter_at_offset(matchEnd);
-                this._applyTag('invisible', bracket3, bracket4);
-            }
-            
-            // If checked, apply strikethrough and dimming to the text after the checkbox
-            if (isChecked) {
-                // Find text after the checkbox (skip any spaces after the checkbox)
-                const textAfterCheckbox = line.substring(match.index + 3); // Everything after [X]
-                const textMatch = textAfterCheckbox.match(/^\s*/); // Find leading spaces
-                const spacesLength = textMatch ? textMatch[0].length : 0;
-                const textStart = matchEnd + spacesLength;
-                const textEnd = lineOffset + line.length;
-                
-                // Apply strikethrough and dimming to the text after the checkbox
-                if (textStart < textEnd) {
-                    const textStartIter = this.buffer.get_iter_at_offset(textStart);
-                    const textEndIter = this.buffer.get_iter_at_offset(textEnd);
-                    this._applyTag('todo-checked-text', textStartIter, textEndIter);
-                }
-            }
-        }
-    }
-    
-    _applyTablePattern(line, lineOffset) {
-        // Check if this line looks like a table row (contains pipes)
-        if (!line.includes('|')) return;
-        
-        // Check if it's a separator line (|---|---|---| or | --- | --- | --- |)
-        const isSeparator = /^\s*\|[\s\-:|]+\|\s*$/.test(line);
-        
-        // Find all pipe positions and apply styling
-        for (let i = 0; i < line.length; i++) {
-            if (line[i] === '|') {
-                const pipeStart = this.buffer.get_iter_at_offset(lineOffset + i);
-                const pipeEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
-                this._applyTag('table-pipe', pipeStart, pipeEnd);
-            }
-        }
-        
-        // If it's a separator line, style the dashes and colons
-        if (isSeparator) {
-            for (let i = 0; i < line.length; i++) {
-                if (line[i] === '-' || line[i] === ':') {
-                    const charStart = this.buffer.get_iter_at_offset(lineOffset + i);
-                    const charEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
-                    this._applyTag('table-separator', charStart, charEnd);
-                }
-            }
-        }
-    }
-    
-    _applyTablePatternWithCursor(line, lineOffset, cursorOffset) {
-        // Check if this line looks like a table row (contains pipes)
-        if (!line.includes('|')) return;
-        
-        // Check if it's a separator line (|---|---|---| or | --- | --- | --- |)
-        const isSeparator = /^\s*\|[\s\-:|]+\|\s*$/.test(line);
-        
-        // Check if it's a header line (we need to look back one line, but for simplicity
-        // we'll check if the current line has pipes and the text isn't all dashes)
-        const isHeader = !isSeparator && line.trim().startsWith('|');
-        
-        const cursorOnLine = cursorOffset >= lineOffset && cursorOffset <= lineOffset + line.length;
-        
-        // Find all pipe positions and apply styling
-        for (let i = 0; i < line.length; i++) {
-            if (line[i] === '|') {
-                const pipeStart = this.buffer.get_iter_at_offset(lineOffset + i);
-                const pipeEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
-                
-                if (cursorOnLine) {
-                    // Show pipes when cursor is on the line
-                    this._applyTag('table-pipe', pipeStart, pipeEnd);
-                } else {
-                    // Dim pipes when cursor is away
-                    this._applyTag('table-pipe', pipeStart, pipeEnd);
-                }
-            }
-        }
-        
-        // If it's a separator line, style the dashes and colons
-        if (isSeparator) {
-            for (let i = 0; i < line.length; i++) {
-                if (line[i] === '-' || line[i] === ':') {
-                    const charStart = this.buffer.get_iter_at_offset(lineOffset + i);
-                    const charEnd = this.buffer.get_iter_at_offset(lineOffset + i + 1);
-                    this._applyTag('table-separator', charStart, charEnd);
-                }
-            }
-        }
-        
-        // Parse cells and apply header styling if this is the first row
-        if (!isSeparator) {
-            const cells = line.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
-            
-            // Find cell positions and apply header styling
-            let currentPos = line.indexOf('|') + 1;
-            for (const cell of cells) {
-                const cellStart = line.indexOf(cell, currentPos);
-                if (cellStart !== -1) {
-                    const start = this.buffer.get_iter_at_offset(lineOffset + cellStart);
-                    const end = this.buffer.get_iter_at_offset(lineOffset + cellStart + cell.length);
-                    
-                    // Apply header tag to cells (in real implementation, we'd need to track
-                    // whether this is actually a header row by looking at the next line)
-                    // For now, we'll style all table content
-                    this._applyTag('table-cell', start, end);
-                    
-                    currentPos = cellStart + cell.length + 1;
-                }
-            }
-        }
-    }
-}
+};
