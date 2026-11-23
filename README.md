@@ -95,7 +95,7 @@ Open one or more files (a path that doesn't exist yet is created on first save):
 jotite ~/Documents/notes/mynote.md other.md
 ```
 
-Jotite runs as a single instance: launching it again opens files in the running app, and plain `jotite` brings the most recently used window to the front (a new note window opens only when none is open).
+Jotite runs as a single instance: launching it again opens files in the running app, and plain `jotite` opens a new note window (or brings forward the window that already shows today's note).
 
 Run the test suite from the repository root:
 ```bash
